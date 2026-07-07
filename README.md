@@ -46,8 +46,7 @@ can use wasm internally and we dont even need to know.
 First im gonna talk about nodejs like coding inside the existing codebase, not
 gonna talk about importing nodejs packages.
 
-in `limun.json` we can include things like `"legacy": ["require"]` which allows
-us to use `require()` in the codebase.
+so we can have a `Limun.legacy.require()` in the codebase.
 
 then we can have big wrapper library that impls nodejs api in pure typescript by
 wrapping @std packages.
@@ -64,16 +63,15 @@ so then you can write code with nodejs apis.
 so next thing is nodejs/npm packages.
 
 for these we can host a website similar to https://esm.sh but this would
-basically convert `npm` packages into limun code that is using
-`"legacy": ["require"]` and `@std/node` along with its dependecies. it adds a
-`limun.json` file and stuff, transforms imports. transforms entry points to use
-injections etc. it can be at https://limun.run or https://limun.space we have
-both.
+basically convert `npm` packages into limun code that is using `@std/node` along
+with its dependecies. it adds a `limun.json` file and stuff, transforms imports.
+transforms entry points to use injections etc. it can be at https://limun.run or
+https://limun.space we have both.
 
-> another thing we can do use, making a cli package that allows use to `add` npm
-> packages which auto transforms them. without needing to maintain a hosted
-> site. But hosted site is cool, because it would allow any web app to use
-> nodejs packages. using old things like `Buffer` and etc. we can do both.
+another thing we can do use, making a cli package that allows use to `add` npm
+packages which auto transforms them. without needing to maintain a hosted site.
+But hosted site is cool, because it would allow any web app to use nodejs
+packages. using old things like `Buffer` and etc. we can do both.
 
 ---
 
