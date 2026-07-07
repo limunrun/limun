@@ -52,8 +52,8 @@ then we can have big wrapper library that impls nodejs api in pure typescript by
 wrapping @std packages.
 
 it injects the nodejs globals to `globalThis` like this
-`injectNode(globalThis)`. this is a seperate package you install. something like
-`@limun/node` or since it uses `@std` package it can be `@std/node` or
+`injectNodeJs(globalThis)`. this is a seperate package you install. something
+like `@limun/node` or since it uses `@std` package it can be `@std/node` or
 something.
 
 so then you can write code with nodejs apis.
@@ -79,7 +79,7 @@ one important thing here is limun js should have a seperete instance of
 `globalThis` for every remote package, so they dont inject and override
 each-other's globals. unless they allow it in `limun.json`.
 
-thats the reason we do `injectNode(globalThis)`. nobody can pollute your scope
+thats the reason we do `injectNodeJs(globalThis)`. nobody can pollute your scope
 implicitly. so you have to deliberately pollute your scope. of course you can
 disable global scope protection from limun.js again.
 
