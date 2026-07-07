@@ -6,6 +6,12 @@ Goal is making the JS runtime space cleaner. thats the whole reason Limun will
 exists. if we are not maximizing for this there is no reason for Limun to
 exists, we can just use Bun or Node.js directly. its the API.
 
+## Why web standard api?
+
+not for browser compebility, that is a side effect.
+
+the reason is, its a good standard.
+
 ## API
 
 Web native API by default.

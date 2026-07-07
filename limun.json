@@ -1,5 +1,13 @@
 {
     "imports": {
-        "foo": "./examples/foo.js"
+        "foo": "./examples/foo.js",
+        "bar": "./examples/bar.js",
+        "examples/": "./examples/",
+        "blocked-example": null
+    },
+    "scopes": {
+        "./examples/": {
+            "bar": "./examples/scoped-bar.js"
+        }
     }
 }
