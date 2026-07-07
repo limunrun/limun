@@ -6,17 +6,20 @@
 //!                      Versioned, allowed to break/shrink. (`Limun.hello`)
 //!   3. `@std/*`      — userland stability layer wrapping 1+2. (packages, not here)
 //!
-//! Modules: real ESM via V8's module machinery. The resolver is ours — this
-//! is where limun's identity lives (later: #sha256, https, port-on-import).
-//! For now: relative/absolute file paths + web-standard import maps read
-//! from ./limun.json ("imports": exact keys and "prefix/" keys). Anything
-//! else fails loud.
+//! Modules: real ESM via V8's module machinery, both static and dynamic
+//! `import()`. Every module has a URL identity (`file://` local, `https://`
+//! remote) so relative imports resolve the same way regardless of where the
+//! importing module came from. The resolver is ours — this is where
+//! limun's identity lives (later: #sha256 checksums, a lock file). Web-
+//! standard import maps (`imports`/`scopes`/`integrity`) are read from
+//! ./limun.json. Anything unresolvable fails loud.
 
 mod core;
 mod limun;
 mod web;
 
 use std::{env, fs, process::ExitCode};
+use url::Url;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
@@ -33,6 +36,14 @@ fn main() -> ExitCode {
         }
     };
 
+    let entry_url = match Url::from_file_path(&entry_path) {
+        Ok(u) => u,
+        Err(()) => {
+            eprintln!("limun: cannot form a URL from {}", entry_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+
     if let Err(e) = core::import_map::load_import_map() {
         eprintln!("limun: limun.json: {e}");
         return ExitCode::FAILURE;
@@ -45,7 +56,7 @@ fn main() -> ExitCode {
 
     let exit = {
         let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
-        let exit = core::execute(isolate, &entry_path);
+        let exit = core::execute(isolate, &entry_url);
         // Globals must drop while the isolate is still alive.
         core::state::clear_module_state();
         exit

@@ -3,20 +3,27 @@
 pub mod event_loop;
 pub mod exception;
 pub mod import_map;
+pub mod import_meta;
+pub mod io;
 pub mod module;
 pub mod rejections;
 pub mod resolver;
 pub mod state;
 
 use crate::core::exception::report_exception;
-use crate::core::module::{load_module, resolve_module_callback};
+use crate::core::import_meta::host_initialize_import_meta_object_callback;
+use crate::core::module::{dynamic_import_callback, load_module, resolve_module_callback};
 use crate::limun;
 use crate::web;
-use std::path::Path;
 use std::process::ExitCode;
+use url::Url;
 
-pub fn execute(isolate: &mut v8::Isolate, entry: &Path) -> ExitCode {
+pub fn execute(isolate: &mut v8::Isolate, entry: &Url) -> ExitCode {
     rejections::install(isolate);
+    isolate.set_host_import_module_dynamically_callback(dynamic_import_callback);
+    isolate.set_host_initialize_import_meta_object_callback(
+        host_initialize_import_meta_object_callback,
+    );
 
     v8::scope!(let scope, isolate);
 
@@ -30,7 +37,7 @@ pub fn execute(isolate: &mut v8::Isolate, entry: &Path) -> ExitCode {
     v8::tc_scope!(let tc, scope);
 
     let Some(module) = load_module(tc, entry) else {
-        report_exception(tc, &entry.display().to_string());
+        report_exception(tc, entry.as_str());
         return ExitCode::FAILURE;
     };
 
@@ -38,7 +45,7 @@ pub fn execute(isolate: &mut v8::Isolate, entry: &Path) -> ExitCode {
         .instantiate_module(tc, resolve_module_callback)
         .is_none()
     {
-        report_exception(tc, &entry.display().to_string());
+        report_exception(tc, entry.as_str());
         return ExitCode::FAILURE;
     }
 
@@ -50,12 +57,12 @@ pub fn execute(isolate: &mut v8::Isolate, entry: &Path) -> ExitCode {
             .to_string(tc)
             .map(|s| s.to_rust_string_lossy(tc))
             .unwrap_or_else(|| "<unprintable exception>".to_string());
-        eprintln!("limun: {}: {text}", entry.display());
+        eprintln!("limun: {entry}: {text}");
         return ExitCode::FAILURE;
     }
 
     if tc.has_caught() {
-        report_exception(tc, &entry.display().to_string());
+        report_exception(tc, entry.as_str());
         return ExitCode::FAILURE;
     }
 
@@ -64,7 +71,7 @@ pub fn execute(isolate: &mut v8::Isolate, entry: &Path) -> ExitCode {
     event_loop::run(tc);
 
     if tc.has_caught() {
-        report_exception(tc, &entry.display().to_string());
+        report_exception(tc, entry.as_str());
         return ExitCode::FAILURE;
     }
 

@@ -1,25 +1,24 @@
 //! Per-thread module state (single isolate per process for now).
 //! Cleared before isolate teardown — v8::Global must not outlive the isolate.
 
+use crate::core::import_map::ImportMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use url::Url;
 
 thread_local! {
-    /// canonical path -> compiled module (dedup: same file == same module instance)
-    pub static REGISTRY: RefCell<HashMap<PathBuf, v8::Global<v8::Module>>> =
+    /// module URL -> compiled module (dedup: same URL == same module instance)
+    pub static REGISTRY: RefCell<HashMap<Url, v8::Global<v8::Module>>> =
         RefCell::new(HashMap::new());
-    /// module identity hash -> its directory (for resolving its relative imports)
-    pub static MODULE_DIRS: RefCell<HashMap<i32, PathBuf>> =
-        RefCell::new(HashMap::new());
-    /// (project root, "imports" from limun.json)
-    pub static IMPORT_MAP: RefCell<Option<(PathBuf, HashMap<String, String>)>> =
-        RefCell::new(None);
+    /// module identity hash -> its own URL (for resolving its relative imports)
+    pub static MODULE_URLS: RefCell<HashMap<i32, Url>> = RefCell::new(HashMap::new());
+    /// Parsed ./limun.json import map, if any.
+    pub static IMPORT_MAP: RefCell<Option<ImportMap>> = RefCell::new(None);
 }
 
 pub fn clear_module_state() {
     REGISTRY.with(|r| r.borrow_mut().clear());
-    MODULE_DIRS.with(|d| d.borrow_mut().clear());
+    MODULE_URLS.with(|d| d.borrow_mut().clear());
     crate::core::event_loop::clear_all();
     crate::core::rejections::clear_all();
 }

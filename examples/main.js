@@ -4,7 +4,9 @@ import { foo } from "foo";
 console.log(greet("modules"));
 console.log(foo());
 console.log(Limun.hello("Shiba"));
-
+setTimeout(() => console.log("timeout before bar"))
+const { bar } = await import("./bar.js")
+console.log(bar())
 
 const desc = (obj, name) => {
   const d = Object.getOwnPropertyDescriptor(obj, name);
