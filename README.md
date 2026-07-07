@@ -53,7 +53,7 @@ wrapping @std packages.
 
 it injects the nodejs globals to `globalThis` like this
 `injectNodeJs(globalThis)`. this is a seperate package you install. something
-like `@limun/node` or since it uses `@std` package it can be `@std/node` or
+like `@limun/node` or since it uses `@std` packages it can be `@std/node` or
 something.
 
 so then you can write code with nodejs apis.
