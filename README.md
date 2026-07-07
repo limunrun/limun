@@ -68,9 +68,11 @@ with its dependecies. it adds a `limun.json` file and stuff, transforms imports.
 transforms entry points to use injections etc. it can be at https://limun.run or
 https://limun.space we have both.
 
-another thing we can do use, making a cli package that allows use to `add` npm
+another thing we can do use, making a cli package that allows us to `add` npm
 packages which auto transforms them. without needing to maintain a hosted site.
-But hosted site is cool, because it would allow any web app to use nodejs
+it can probably import them withh file://.
+
+but hosted site is cool, because it would allow any web app to use nodejs
 packages. using old things like `Buffer` and etc. we can do both.
 
 ---
