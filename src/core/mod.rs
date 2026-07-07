@@ -12,7 +12,9 @@ pub mod state;
 
 use crate::core::exception::report_exception;
 use crate::core::import_meta::host_initialize_import_meta_object_callback;
-use crate::core::module::{dynamic_import_callback, load_module, resolve_module_callback};
+use crate::core::module::{
+    ModuleKind, dynamic_import_callback, load_module, resolve_module_callback,
+};
 use crate::limun;
 use crate::web;
 use std::process::ExitCode;
@@ -36,7 +38,10 @@ pub fn execute(isolate: &mut v8::Isolate, entry: &Url) -> ExitCode {
 
     v8::tc_scope!(let tc, scope);
 
-    let Some(module) = load_module(tc, entry) else {
+    // The entry point is always plain JS — import attributes only make
+    // sense on an `import` statement/expression, and there's no such thing
+    // for the script you hand to `limun` on the command line.
+    let Some(module) = load_module(tc, entry, ModuleKind::JavaScript) else {
         report_exception(tc, entry.as_str());
         return ExitCode::FAILURE;
     };

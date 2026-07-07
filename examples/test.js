@@ -205,6 +205,60 @@ console.group("unhandled promise rejection reporting");
 console.groupEnd();
 
 // ---------------------------------------------------------------------
+console.group("import attributes: with { type: \"json\" | \"text\" }");
+// ---------------------------------------------------------------------
+{
+  // Static.
+  const jsonMod = await import("./data.json", { with: { type: "json" } });
+  check("static-equivalent json import works", jsonMod.default.name === "Shiba" && jsonMod.default.count === 42 && jsonMod.default.nested.ok === true);
+
+  const textMod = await import("./note.txt", { with: { type: "text" } });
+  check("text import works", textMod.default.trim() === "hello from a text module");
+
+  // Same URL, no attribute at all -> ordinary rules still apply elsewhere
+  // (a .json file with no `type` attribute would fail to parse as JS, so we
+  // don't test that path here — just confirming plain JS imports are
+  // unaffected by any of this).
+  const { greet: stillPlainJs } = await import("./greet.js");
+  check("plain js imports unaffected", typeof stillPlainJs === "function");
+
+  // JSON modules only ever have a single `default` export — a named import
+  // should fail to link, exactly like a browser.
+  try {
+    await import("./bad_named_json_import.js");
+    check("named import from json module rejected", false);
+  } catch (e) {
+    check("named import from json module rejected", e.message.includes("does not provide an export"));
+  }
+
+  // Unsupported attribute key -> TypeError (dynamic import).
+  try {
+    await import("./greet.js", { with: { potato: "yes" } });
+    check("unsupported attribute key throws", false);
+  } catch (e) {
+    check("unsupported attribute key throws", e instanceof TypeError);
+  }
+
+  // Unsupported `type` value -> TypeError (dynamic import).
+  try {
+    await import("./greet.js", { with: { type: "css" } });
+    check("unsupported type value throws", false);
+  } catch (e) {
+    check("unsupported type value throws", e instanceof TypeError);
+  }
+
+  // Same URL + different `type` = different module identity (spec
+  // requirement — the cache key includes the attribute, not just the URL).
+  const asJson = await import("./data.json", { with: { type: "json" } });
+  const asText = await import("./data.json", { with: { type: "text" } });
+  check(
+    "same URL, different type -> distinct modules",
+    typeof asJson.default === "object" && typeof asText.default === "string"
+  );
+}
+console.groupEnd();
+
+// ---------------------------------------------------------------------
 console.group("remote imports (best-effort — needs network)");
 // ---------------------------------------------------------------------
 {
