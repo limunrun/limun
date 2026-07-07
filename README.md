@@ -1,102 +1,121 @@
-# Limun
+# limun
 
-Idea of a JS runtime, I will probably start making next year probably?
+Web-standard JS runtime. Node.js is a guest, not a landlord.
 
-Goal is making the JS runtime space cleaner. thats the whole reason Limun will
-exists. if we are not maximizing for this there is no reason for Limun to
-exists, we can just use Bun or Node.js directly. its the API.
+Minimal V8 embed in Rust: real ESM modules with import maps, an event loop
+(so `setTimeout`/`setInterval`/`await` actually work), the full WHATWG
+Console Standard, and the web-standard globals (`self`, `alert`, `confirm`,
+`prompt`). `Limun.hello` is the seed of the non-standard native namespace.
 
-## API
+## Layout
 
-Web native API by default.
+```
+src/main.rs                  entry point, V8 boot/teardown
+src/core/                    engine internals (no JS-facing surface)
+  mod.rs                     execute(): module graph -> eval -> event loop
+  module.rs                  module loading & the V8 resolution callback
+  resolver.rs                specifier -> file path (import map aware)
+  import_map.rs               reads ./limun.json
+  event_loop.rs               timer wheel + microtask draining
+  rejections.rs                unhandled promise rejection reporting
+  exception.rs                uncaught exception reporting
+  state.rs                    thread-local module/timer/rejection registries
+src/web/                     Layer 1 — web-standard globals on globalThis
+  console/                    WHATWG Console Standard (all 18 methods)
+  prompt.rs                    alert/confirm/prompt (Deno's terminal model)
+  timers.rs                    setTimeout/setInterval/clearTimeout/
+                                clearInterval/queueMicrotask
+src/limun/                   Layer 2 — Limun namespace (non-standard)
+  hello.rs                     Limun.hello, template for future ops
+examples/                     smoke-test scripts
+limun.json                    import map example
+.devcontainer/                docker/podman dev environment
+```
 
-Uses the web native api even for fs stuff
-https://developer.mozilla.org/en-US/docs/Web/API/File_System_API
+## Build & run
 
-if something exists in the web standard impl it and use it, if its missing for
-our case, have a global namespace like `Limun` and in it have things like
-`Limun.fs.stat`.
+Inside the devcontainer (or any machine with stable Rust):
 
-Global space always keeps close to the web standards, only excluding DOM stuff.
+```sh
+cargo run -- examples/main.js
+```
 
-Only breaking change can happen on `Limun`, which might lose an impl if it now
-exists in web standard and we impl it using the standard.
+First build downloads a prebuilt static libv8 (~100 MiB) from the rusty_v8
+GitHub releases and takes a few minutes. After that, incremental builds are
+normal Rust speed.
 
-so `Limun` namespace exists purely for things that doesnt exists in the web
-standard yet.
+## Devcontainer
 
-`Limun` namespace mode is async by default, so it gives promises, but there are
-`Sync` suffix variants exists.
+### docker
 
-so things like fs might be all over the place, like it can have some stuff in
-standard web api, and some stuff `Limun` at the same time. so we can have things
-like @std/fs which combines them all into a single library, which also prevents
-breaking your code when something in `Limun` later moves into the standard web
-globals.
+Open the folder in VS Code → "Reopen in Container". Nothing else needed.
 
-web url packages, like https://esm.sh, we can checksum the version with
-`#sha256` suffix. but also have a lock file.
+### podman
 
-deno like permission system, and also including worker permissions. it allows
-isolated code running, and can be really useful for things like plugins which
-can use wasm internally and we dont even need to know.
+Either set VS Code's engine once:
 
-## Node Compat
+```jsonc
+// VS Code settings.json
+{ "dev.containers.dockerPath": "podman" }
+```
 
-First im gonna talk about nodejs like coding inside the existing codebase, not
-gonna talk about importing nodejs packages.
+or use the devcontainer CLI directly:
 
-so we can have a `Limun.legacy.require()` in the codebase.
+```sh
+devcontainer up --workspace-folder . --docker-path podman
+devcontainer exec --workspace-folder . --docker-path podman cargo run -- examples/main.js
+```
 
-then we can have big wrapper library that impls nodejs api in pure typescript by
-wrapping @std packages.
+Rootless podman: if the workspace mount comes up with wrong ownership,
+uncomment the `--userns=keep-id` line in `.devcontainer/devcontainer.json`
+(podman-only flag, remove for docker).
 
-it injects the nodejs globals to `globalThis` like this
-`injectNodeJs(globalThis)`. this is a seperate package you install. something
-like `@limun/node` or since it uses `@std` packages it can be `@std/node` or
-something.
+## Architecture (where things go as this grows)
 
-so then you can write code with nodejs apis.
+1. **Web globals** (`src/web/`) — frozen, standards only. `console`, `self`,
+   `alert`/`confirm`/`prompt`, and the timer globals are the seed; `fetch`,
+   `URL`, streams etc. arrive here and never break.
+2. **`Limun` namespace** (`src/limun/`) — native surface for what the web
+   doesn't cover. Versioned, allowed to break and shrink. `Limun.hello`
+   lives here as the template for every future op.
+3. **`@std/*` packages** — userland stability layer wrapping 1+2. Not part
+   of this binary.
 
----
+`src/core/` is neither of these — it's engine plumbing (module loading, the
+event loop, exception/rejection reporting) that `web`/`limun` sit on top of
+but that defines no JS-facing global itself.
 
-so next thing is nodejs/npm packages.
+Node compat, when it comes, is a ported-package concern (separate context,
+membrane at the boundary) — never ambient, never in these globals.
 
-for these we can host a website similar to https://esm.sh but this would
-basically convert `npm` packages into limun code that is using `@std/node` along
-with its dependecies. it adds a `limun.json` file and stuff, transforms imports.
-transforms entry points to use injections etc. it can be at https://limun.run or
-https://limun.space we have both.
+## Modules & import maps
 
-another thing we can do use, making a cli package that allows us to `add` npm
-packages which auto transforms them. without needing to maintain a hosted site.
-it can probably import them withh file://.
+Real ESM via V8's module machinery. Relative/absolute specifiers resolve
+against the importing module's directory. Bare specifiers are resolved
+against `./limun.json`'s `"imports"` map (exact keys and `"prefix/"` keys,
+per the web-standard import map format) — anything else fails loud instead
+of silently misresolving.
 
-but hosted site is cool, because it would allow any web app to use nodejs
-packages. using old things like `Buffer` and etc. we can do both.
+## Event loop
 
-also i might be ignoreing upgrades here. we need to add support for package
-manager packages. similar to plugins. makes the most sense.
+`setTimeout`/`setInterval`/`clearTimeout`/`clearInterval`/`queueMicrotask`
+are backed by a minimal single-threaded timer wheel in `core::event_loop`
+(sleeps until the next deadline, no busy-waiting). `await`/`Promise`
+themselves need no runtime code — that's all V8; the event loop's only job
+is firing due timers and telling V8 when to drain its microtask queue.
 
-then we can use them by prefix: like `npm:`. the cli package can auto add it.
+Promises that reject with no handler are reported (`Uncaught (in promise)
+...` to stderr) and fail the run, matching Node/Deno/browser devtools —
+V8 itself does nothing by default.
 
-we dont wanna have npm and node stuff within the runtime itself. they should all
-be external packages.
+## Adding a native function
 
----
+Copy the `hello` pattern in `src/limun/hello.rs`:
 
-one important thing here is limun js should have a seperete instance of
-`globalThis` for every remote package, so they dont inject and override
-each-other's globals. unless they allow it in `limun.json`.
+1. Write a `fn(scope, args, rv)` callback.
+2. Register it in `src/limun/mod.rs`'s `install` with
+   `set_fn(scope, limun, "name", callback)`.
 
-thats the reason we do `injectNodeJs(globalThis)`. nobody can pollute your scope
-implicitly. so you have to deliberately pollute your scope. of course you can
-disable global scope protection from limun.js again.
-
-## Runtime
-
-Probably will use V8, probably will use rust.
-
----
-
-Should be easy.
+That's the whole op system for now. When this gets real, callbacks move to
+a registry and the `Limun` object gets built from it, but this is the right
+size today.

@@ -1,0 +1,19 @@
+[package]
+name = "limun"
+version = "0.0.1"
+edition = "2021"
+description = "Web-standard JS runtime. Node.js is a guest, not a landlord."
+
+[[bin]]
+name = "limun"
+path = "src/main.rs"
+
+[dependencies]
+# rusty_v8 — raw V8 bindings. Downloads a prebuilt static lib at build time.
+v8 = "150"
+# limun.json parsing (import maps)
+serde_json = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1

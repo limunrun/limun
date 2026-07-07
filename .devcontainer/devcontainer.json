@@ -1,0 +1,19 @@
+{
+  "name": "limun",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "remoteUser": "vscode",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml"
+      ]
+    }
+  }
+
+  // Rootless podman: if you hit UID/permission issues on the workspace mount,
+  // uncomment the line below (podman-only flag, remove for docker):
+  // ,"runArgs": ["--userns=keep-id"]
+}

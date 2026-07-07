@@ -1,0 +1,9 @@
+# Official devcontainers Rust image: latest stable rustc, cargo, git,
+# non-root `vscode` user. Works with both docker and rootless podman.
+FROM mcr.microsoft.com/devcontainers/rust:1-bookworm
+
+# rusty_v8 downloads a prebuilt static libv8 at build time (curl is present
+# in the base image). Nothing extra is needed for the prebuilt path.
+#
+# If you ever build V8 from source instead (V8_FROM_SOURCE=1), you would
+# need python3 + a C++ toolchain, but don't do that to yourself yet.
