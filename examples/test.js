@@ -25,14 +25,18 @@ console.group("globalThis shape (Web IDL enumerability)");
   check("globalThis.constructor.name === Object", globalThis.constructor.name === "Object");
 
   // Namespace objects (console, Limun): non-enumerable per Web IDL §3.7.5.
-  for (const name of ["console", "Limun"]) {
+  // Interface objects (constructors: TextEncoder, URL, ...) are *also*
+  // non-enumerable — verified against real Node
+  // (`Object.getOwnPropertyDescriptor(globalThis, "URL").enumerable ===
+  // false`, same as `Array`/`Object`).
+  for (const name of ["console", "Limun", "TextEncoder", "TextDecoder", "URL", "URLSearchParams", "Headers", "Response"]) {
     check(`${name} is own property`, Object.getOwnPropertyNames(globalThis).includes(name));
     check(`${name} is non-enumerable`, desc(globalThis, name) === false);
     check(`${name} NOT in Object.keys`, !Object.keys(globalThis).includes(name));
   }
 
   // Ordinary interface attributes: enumerable per Web IDL §3.7.3.
-  for (const name of ["self", "alert", "confirm", "prompt", "setTimeout", "setInterval", "clearTimeout", "clearInterval", "queueMicrotask"]) {
+  for (const name of ["self", "alert", "confirm", "prompt", "setTimeout", "setInterval", "clearTimeout", "clearInterval", "queueMicrotask", "btoa", "atob", "fetch"]) {
     check(`${name} is enumerable`, desc(globalThis, name) === true);
     check(`${name} in Object.keys`, Object.keys(globalThis).includes(name));
   }
@@ -136,10 +140,8 @@ console.group("dynamic import() + import.meta");
   check("import.meta.url is a file: URL", import.meta.url.startsWith("file://"));
   check("import.meta.url ends with this file", import.meta.url.endsWith("/test.js"));
 
-  // No `URL` global yet (separate feature), so check via string ops instead
-  // of constructing an expected URL directly.
   const resolved = import.meta.resolve("./greet.js");
-  const expected = import.meta.url.replace(/test\.js$/, "greet.js");
+  const expected = new URL("./greet.js", import.meta.url).href;
   check("import.meta.resolve works", resolved === expected);
 
   const dynamicMod = await import("./greet.js");
@@ -255,6 +257,232 @@ console.group("import attributes: with { type: \"json\" | \"text\" }");
     "same URL, different type -> distinct modules",
     typeof asJson.default === "object" && typeof asText.default === "string"
   );
+}
+console.groupEnd();
+
+// ---------------------------------------------------------------------
+console.group("TextEncoder/TextDecoder (WHATWG Encoding Standard)");
+// ---------------------------------------------------------------------
+{
+  const enc = new TextEncoder();
+  check("TextEncoder.encoding", enc.encoding === "utf-8");
+
+  const bytes = enc.encode("héllo");
+  check("encode() returns a Uint8Array", bytes instanceof Uint8Array);
+  check("encode() produces correct UTF-8 bytes", [...bytes].join(",") === "104,195,169,108,108,111");
+
+  const dec = new TextDecoder();
+  check("TextDecoder.encoding", dec.encoding === "utf-8");
+  check("TextDecoder default fatal/ignoreBOM", dec.fatal === false && dec.ignoreBOM === false);
+  check("decode() round-trips", dec.decode(bytes) === "héllo");
+
+  const dest = new Uint8Array(3);
+  const { read, written } = enc.encodeInto("héllo", dest);
+  check(
+    "encodeInto() stops at a char boundary, doesn't split a code point",
+    written === 3 && read === 2 && dest[0] === 104 && dest[1] === 195 && dest[2] === 169,
+  );
+
+  const strictDecoder = new TextDecoder("utf-8", { fatal: true });
+  check("fatal option is stored", strictDecoder.fatal === true);
+  try {
+    strictDecoder.decode(new Uint8Array([0xff, 0xfe]));
+    check("fatal: true throws on invalid UTF-8", false);
+  } catch (e) {
+    check("fatal: true throws on invalid UTF-8", e instanceof TypeError);
+  }
+  check(
+    "fatal: false (default) replaces invalid UTF-8 instead of throwing",
+    new TextDecoder().decode(new Uint8Array([0xff, 0xfe])) === "\ufffd\ufffd",
+  );
+
+  try {
+    new TextDecoder("shift_jis");
+    check("unsupported label throws RangeError", false);
+  } catch (e) {
+    check("unsupported label throws RangeError", e instanceof RangeError);
+  }
+}
+console.groupEnd();
+
+// ---------------------------------------------------------------------
+console.group("btoa/atob (WHATWG HTML Standard)");
+// ---------------------------------------------------------------------
+{
+  check("btoa/atob round-trip", atob(btoa("hello, limun")) === "hello, limun");
+  check("btoa produces standard base64", btoa("hello") === "aGVsbG8=");
+
+  try {
+    btoa("h\u{1F600}i"); // outside Latin1 range
+    check("btoa throws on non-Latin1 input", false);
+  } catch (e) {
+    check("btoa throws on non-Latin1 input", e.name === "InvalidCharacterError");
+  }
+
+  try {
+    atob("not valid base64!!!");
+    check("atob throws on invalid base64", false);
+  } catch (e) {
+    check("atob throws on invalid base64", e.name === "InvalidCharacterError");
+  }
+}
+console.groupEnd();
+
+// ---------------------------------------------------------------------
+console.group("URL / URLSearchParams (WHATWG URL Standard)");
+// ---------------------------------------------------------------------
+{
+  const u = new URL("https://user:pass@example.com:8080/path/to/thing?a=1&b=2#frag");
+  check("href", u.href === "https://user:pass@example.com:8080/path/to/thing?a=1&b=2#frag");
+  check("origin", u.origin === "https://example.com:8080");
+  check("protocol", u.protocol === "https:");
+  check("username/password", u.username === "user" && u.password === "pass");
+  check("host/hostname/port", u.host === "example.com:8080" && u.hostname === "example.com" && u.port === "8080");
+  check("pathname", u.pathname === "/path/to/thing");
+  check("search", u.search === "?a=1&b=2");
+  check("hash", u.hash === "#frag");
+  check("toString() === href", u.toString() === u.href && `${u}` === u.href);
+
+  u.pathname = "/new/path";
+  u.hash = "newfrag"; // spec: leading "#" optional on the setter
+  check("pathname/hash setters", u.pathname === "/new/path" && u.hash === "#newfrag");
+
+  // `searchParams` is *live*: mutating it updates `.search`/`.href`
+  // immediately, and it's the same object every time it's accessed.
+  check("searchParams identity is stable", u.searchParams === u.searchParams);
+  u.searchParams.append("c", "3");
+  check("searchParams mutation reflects into .search", u.search === "?a=1&b=2&c=3");
+  u.search = "?x=9";
+  check(".search reassignment reflects into searchParams", u.searchParams.get("x") === "9" && u.searchParams.get("a") === null);
+
+  const relative = new URL("./b.js", "https://example.com/a/c.js");
+  check("relative URL resolution against base", relative.href === "https://example.com/a/b.js");
+
+  check("URL.canParse valid", URL.canParse("https://x.com") === true);
+  check("URL.canParse invalid", URL.canParse("not a url") === false);
+  check("URL.parse valid returns a URL", URL.parse("https://y.com")?.href === "https://y.com/");
+  check("URL.parse invalid returns null", URL.parse("not a url") === null);
+
+  try {
+    new URL("not a url");
+    check("constructor throws TypeError on unparsable input", false);
+  } catch (e) {
+    check("constructor throws TypeError on unparsable input", e instanceof TypeError);
+  }
+
+  // Standalone URLSearchParams (not attached to any URL).
+  const sp = new URLSearchParams("a=1&b=2&a=3");
+  check("getAll", sp.getAll("a").join(",") === "1,3");
+  check("get returns first match", sp.get("b") === "2");
+  check("has", sp.has("a") === true && sp.has("z") === false);
+  sp.set("a", "99");
+  check("set replaces all same-name entries with one", sp.toString() === "a=99&b=2");
+  sp.delete("b");
+  check("delete", sp.toString() === "a=99");
+  check("size", sp.size === 1);
+  sp.append("z", "1");
+  sp.append("y", "2");
+  sp.sort();
+  check("sort orders by name", sp.toString() === "a=99&y=2&z=1");
+
+  let iterated = [];
+  for (const [k, v] of sp) iterated.push(`${k}=${v}`);
+  check("for...of via [Symbol.iterator] yields all pairs in order", iterated.join(",") === "a=99,y=2,z=1");
+
+  let forEachCount = 0;
+  sp.forEach(() => forEachCount++);
+  check("forEach visits every pair", forEachCount === 3);
+
+  const fromRecord = new URLSearchParams({ x: "1", y: "2" });
+  check("URLSearchParams from a record", fromRecord.toString() === "x=1&y=2");
+
+  const fromArray = new URLSearchParams([["p", "q"], ["p", "r"]]);
+  check("URLSearchParams from pairs, duplicates preserved", fromArray.toString() === "p=q&p=r");
+}
+console.groupEnd();
+
+// ---------------------------------------------------------------------
+console.group("permissions (limun.json's \"permissions\" block)");
+// ---------------------------------------------------------------------
+{
+  // This process is already running under the real ./limun.json, which
+  // grants read: ["./"] and net: ["esm.sh", "raw.githubusercontent.com"]
+  // — enough to make it this far. The *deny* path (a restrictive
+  // permissions.read/net actually blocking something) can't be
+  // demonstrated in-process, since permissions load once at startup —
+  // it's verified manually instead (spin up a second process with its
+  // own scratch limun.json). See core::permissions's doc comment.
+  console.log("(deny-path verified manually against a second limun.json — see core::permissions)");
+}
+console.groupEnd();
+
+// ---------------------------------------------------------------------
+console.group("fetch() / Headers / Response (WHATWG Fetch Standard)");
+// ---------------------------------------------------------------------
+{
+  const h = new Headers({ "Content-Type": "text/plain", "X-Foo": "bar" });
+  check("Headers normalizes names to lowercase", h.get("content-type") === "text/plain");
+  h.append("X-Foo", "baz");
+  check("append() combines with the existing value", h.get("x-foo") === "bar, baz");
+  check("has()", h.has("x-foo") === true);
+  h.delete("x-foo");
+  check("delete()", h.get("x-foo") === null);
+  h.set("x-foo", "only");
+  check("set() replaces rather than combines", h.get("x-foo") === "only");
+  const hEntries = [...new Headers([["b", "2"], ["a", "1"]]).entries()];
+  check("entries() iterates sorted by name", hEntries[0][0] === "a" && hEntries[1][0] === "b");
+
+  const r = new Response("hello world", {
+    status: 201,
+    statusText: "Created",
+    headers: { "x-test": "1" },
+  });
+  check("Response status/ok/statusText", r.status === 201 && r.ok === true && r.statusText === "Created");
+  check("Response.headers is a real Headers instance", r.headers.get("x-test") === "1");
+  check("Response.type/bodyUsed before read", r.type === "basic" && r.bodyUsed === false);
+  check("text()", (await r.text()) === "hello world");
+  check("bodyUsed after read", r.bodyUsed === true);
+  try {
+    await r.text();
+    check("re-reading a consumed body throws", false);
+  } catch (e) {
+    check("re-reading a consumed body throws", e instanceof TypeError);
+  }
+
+  const rJson = new Response(JSON.stringify({ a: 1 }));
+  check("Response.json()", (await rJson.json()).a === 1);
+
+  const rBuf = new Response(new Uint8Array([1, 2, 3]));
+  const ab = await rBuf.arrayBuffer();
+  check("Response.arrayBuffer()", ab instanceof ArrayBuffer && new Uint8Array(ab).join(",") === "1,2,3");
+
+  const rStatic = Response.json({ hello: "world" }, { status: 202 });
+  check("Response.json() static helper", rStatic.status === 202 && (await rStatic.text()) === '{"hello":"world"}');
+
+  const notOk = new Response("nope", { status: 404 });
+  check(".ok is false for a 4xx status", notOk.ok === false);
+
+  // Real network round-trip (best-effort — needs network, same as the
+  // remote-import checks below).
+  try {
+    const res = await fetch("https://esm.sh/lodash-es@4.17.21/isEqual.js");
+    check("fetch(): real request resolves with .ok", res.ok === true);
+    check("fetch(): response body is readable", (await res.text()).length > 0);
+
+    // A real 404 must resolve normally (ok: false), never reject.
+    const res404 = await fetch("https://esm.sh/this-definitely-does-not-exist-12345");
+    check("fetch(): non-2xx status resolves, not rejects", res404.ok === false && res404.status === 404);
+  } catch (e) {
+    console.warn("skipped (no network?):", e.message);
+  }
+
+  // A genuine network failure (unresolvable host) must reject.
+  try {
+    await fetch("https://this-host-should-not-resolve-abcxyz.invalid/");
+    check("fetch(): genuine network failure rejects", false);
+  } catch (e) {
+    check("fetch(): genuine network failure rejects", e instanceof TypeError);
+  }
 }
 console.groupEnd();
 

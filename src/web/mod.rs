@@ -5,9 +5,15 @@
 //! WHATWG HTML `Window` interface, adapted to a terminal (Deno model). No
 //! `window` itself: there is no browsing context here to name.
 
+pub mod base64;
 pub mod console;
+pub mod fetch;
+mod native;
 pub mod prompt;
+pub mod text_encoding;
 pub mod timers;
+pub mod url;
+pub mod url_search_params;
 
 /// Install all web-standard globals onto `context`'s global object.
 pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
@@ -37,6 +43,24 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     // `Object.keys(globalThis)` includes "self" there, so use plain `set`.
     let key = v8::String::new(scope, "self").unwrap();
     global.set(scope, key.into(), global.into());
+
+    // Encoding Standard — real constructible classes (interface objects),
+    // installed non-enumerable (verified against Node:
+    // `Object.getOwnPropertyDescriptor(globalThis, "TextEncoder").enumerable
+    // === false`).
+    text_encoding::install(scope, global);
+
+    // `btoa`/`atob` — plain operations, enumerable (verified against Node).
+    set_fn(scope, global, "btoa", base64::btoa);
+    set_fn(scope, global, "atob", base64::atob);
+
+    // URL Standard — real constructible classes, non-enumerable.
+    url::install(scope, global);
+    url_search_params::install(scope, global);
+
+    // Fetch Standard — `fetch` itself is a plain operation (enumerable);
+    // `Headers`/`Response` are constructible classes (non-enumerable).
+    fetch::install(scope, global);
 }
 
 /// Install a platform global the way real engines do — own, writable,
@@ -63,4 +87,33 @@ fn set_fn(
     let key = v8::String::new(scope, name).unwrap();
     let func = v8::Function::new(scope, callback).unwrap();
     target.set(scope, key.into(), func.into());
+}
+
+pub fn throw_type_error(scope: &mut v8::PinScope, message: &str) {
+    let message = v8::String::new(scope, message).unwrap();
+    let exception = v8::Exception::type_error(scope, message);
+    scope.throw_exception(exception);
+}
+
+pub fn throw_range_error(scope: &mut v8::PinScope, message: &str) {
+    let message = v8::String::new(scope, message).unwrap();
+    let exception = v8::Exception::range_error(scope, message);
+    scope.throw_exception(exception);
+}
+
+/// `atob`/`btoa` throw a `DOMException` named e.g. "InvalidCharacterError"
+/// per spec. We don't have a real `DOMException` class (no DOM), so this
+/// throws a plain `Error` with `.name` set to match — same observable
+/// shape for the common case (`e.name === "InvalidCharacterError"`),
+/// documented simplification (see also: `Request` not implemented,
+/// TypeScript's `resolution-mode` import attribute out of scope).
+pub fn throw_dom_exception(scope: &mut v8::PinScope, name: &str, message: &str) {
+    let msg = v8::String::new(scope, message).unwrap();
+    let exception = v8::Exception::error(scope, msg);
+    if let Ok(obj) = <v8::Local<v8::Object>>::try_from(exception) {
+        let key = v8::String::new(scope, "name").unwrap();
+        let val = v8::String::new(scope, name).unwrap();
+        obj.set(scope, key.into(), val.into());
+    }
+    scope.throw_exception(exception);
 }

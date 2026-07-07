@@ -6,6 +6,7 @@ pub mod import_map;
 pub mod import_meta;
 pub mod io;
 pub mod module;
+pub mod permissions;
 pub mod rejections;
 pub mod resolver;
 pub mod state;

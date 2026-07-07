@@ -9,5 +9,9 @@
         "./examples/": {
             "bar": "./examples/scoped-bar.js"
         }
+    },
+    "permissions": {
+        "read": ["./"],
+        "net": ["esm.sh", "raw.githubusercontent.com"]
     }
 }

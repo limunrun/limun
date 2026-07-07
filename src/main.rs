@@ -49,6 +49,11 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    if let Err(e) = core::permissions::load() {
+        eprintln!("limun: limun.json: {e}");
+        return ExitCode::FAILURE;
+    }
+
     // --- V8 boot (once per process) ---
     let platform = v8::new_default_platform(0, false).make_shared();
     v8::V8::initialize_platform(platform);
