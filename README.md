@@ -2,6 +2,10 @@
 
 Idea of a JS runtime, I will probably start making next year probably?
 
+Goal is making the JS runtime space cleaner. thats the whole reason Limun will
+exists. if we are not maximizing for this there is no reason for Limun to
+exists, we can just use Bun or Node.js directly. its the API.
+
 ## API
 
 Web native API by default.
@@ -66,11 +70,20 @@ basically convert `npm` packages into limun code that is using
 injections etc. it can be at https://limun.run or https://limun.space we have
 both.
 
+> another thing we can do use, making a package that allows use to `add` npm
+> packages which auto transforms them. without needing to maintain a hosted
+> site. But hosted site is cool, because it would allow any web app to use
+> nodejs packages. using old things like `Buffer` and etc. we can do both.
+
 ---
 
 one important thing here is limun js should have a seperete instance of
 `globalThis` for every remote package, so they dont inject and override
 each-other's globals. unless they allow it in `limun.json`.
+
+thats the reason we do `injectNode(globalThis)`. nobody can pollute your scope
+implicitly. so you have to deliberately pollute your scope. of course you can
+disable global scope protection from limun.js again.
 
 ## Runtime
 
