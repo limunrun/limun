@@ -75,6 +75,14 @@ it can probably import them withh file://.
 but hosted site is cool, because it would allow any web app to use nodejs
 packages. using old things like `Buffer` and etc. we can do both.
 
+also i might be ignoreing upgrades here. we need to add support for package
+manager packages. similar to plugins. makes the most sense.
+
+then we can use them by prefix: like `npm:`. the cli package can auto add it.
+
+we dont wanna have npm and node stuff within the runtime itself. they should all
+be external packages.
+
 ---
 
 one important thing here is limun js should have a seperete instance of
