@@ -54,6 +54,19 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // --- tokio runtime boot (before V8 init) ---
+    // Multi-thread so HTTP fetch tasks run concurrently while the V8 isolate
+    // stays single-threaded on this (the main) thread. The V8 thread never
+    // enters the runtime — it only holds a Handle and spawns onto it.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("failed to start tokio runtime");
+    let handle = rt.handle().clone();
+    let rx = core::runtime::init(handle);
+    core::event_loop::set_bridge_rx(rx);
+
     // --- V8 boot (once per process) ---
     let platform = v8::new_default_platform(0, false).make_shared();
     v8::V8::initialize_platform(platform);
@@ -67,11 +80,14 @@ fn main() -> ExitCode {
         exit
     };
 
-    // --- V8 teardown ---
+    // --- V8 teardown (before dropping the tokio runtime — worker threads
+    // may hold `Handle` clones, which is fine; the runtime itself is joined
+    // when `rt` drops below) ---
     unsafe {
         v8::V8::dispose();
     }
     v8::V8::dispose_platform();
+    drop(rt);
 
     exit
 }

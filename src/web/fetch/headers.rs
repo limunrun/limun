@@ -5,8 +5,18 @@
 //! (spec technically preserves original casing for single-value entries
 //! and only normalizes for comparison/iteration — verified against Node,
 //! which *does* just lowercase everything on the way in, so this matches
-//! real-world behavior even if not the letter of the spec). No
-//! `getSetCookie()`/forbidden-header-name guarding.
+//! real-world behavior even if not the letter of the spec).
+//!
+//! Duplicate names are kept in the backing list (that's what `append` is
+//! for) and combined on the way out, per the spec's "get, decode, and split"
+//! / "sort and combine" algorithms: `get(name)` joins every matching value
+//! with `", "`, and iteration yields one entry per name — except
+//! `set-cookie`, which is never combined (each cookie stays its own entry,
+//! and `getSetCookie()` returns them all).
+//!
+//! No forbidden-header-name / header-guard enforcement (a CLI runtime has no
+//! privilege boundary to protect: nothing here is a browser-controlled
+//! request).
 
 use crate::web::native;
 use std::cell::RefCell;
@@ -30,6 +40,7 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     set_method(scope, proto, "entries", entries);
     set_method(scope, proto, "keys", keys);
     set_method(scope, proto, "values", values);
+    set_method(scope, proto, "getSetCookie", get_set_cookie);
 
     let entries_fn = v8::FunctionTemplate::new(scope, entries);
     let iterator_key = v8::Symbol::get_iterator(scope);
@@ -107,12 +118,8 @@ pub(crate) fn parse_value(scope: &mut v8::PinScope, arg: v8::Local<v8::Value>) -
 
     if let Ok(obj) = <v8::Local<v8::Object>>::try_from(arg) {
         // Another Headers instance: copy its pairs.
-        if obj.internal_field_count() > 0 {
-            if let Some(field) = obj.get_internal_field(scope, 0) {
-                if <v8::Local<v8::External>>::try_from(field).is_ok() {
-                    return read_pairs(scope, obj);
-                }
-            }
+        if native::is::<HeadersState>(scope, obj, 0) {
+            return read_pairs(scope, obj);
         }
         // Record (plain object).
         if let Some(keys) = obj.get_own_property_names(scope, Default::default()) {
@@ -158,6 +165,8 @@ fn delete(
     state.0.borrow_mut().retain(|(k, _)| *k != name);
 }
 
+/// `get(name)` — per spec, the *combined* value: every entry with this name,
+/// in insertion order, joined with `", "`. `null` if there are none.
 fn get(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -165,10 +174,62 @@ fn get(
 ) {
     let state: &HeadersState = native::get(scope, args.this(), 0);
     let name = args.get(0).to_rust_string_lossy(scope).to_lowercase();
-    match state.0.borrow().iter().find(|(k, _)| *k == name) {
-        Some((_, v)) => rv.set(v8::String::new(scope, v).unwrap().into()),
-        None => rv.set(v8::null(scope).into()),
+    let combined: Vec<String> = state
+        .0
+        .borrow()
+        .iter()
+        .filter(|(k, _)| *k == name)
+        .map(|(_, v)| v.clone())
+        .collect();
+    if combined.is_empty() {
+        rv.set(v8::null(scope).into());
+    } else {
+        let joined = combined.join(", ");
+        rv.set(v8::String::new(scope, &joined).unwrap().into());
     }
+}
+
+/// `getSetCookie()` — every `set-cookie` value, in insertion order, as an
+/// array. The one header that must never be combined.
+fn get_set_cookie(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue<v8::Value>,
+) {
+    let pairs = read_pairs(scope, args.this());
+    let items: Vec<v8::Local<v8::Value>> = pairs
+        .iter()
+        .filter(|(k, _)| k == "set-cookie")
+        .map(|(_, v)| v8::String::new(scope, v).unwrap().into())
+        .collect();
+    rv.set(v8::Array::new_with_elements(scope, &items).into());
+}
+
+/// The spec's "sort and combine" for iteration: entries sorted by name, with
+/// same-named values joined by `", "` — except `set-cookie`, whose values are
+/// each emitted as their own entry.
+fn sorted_and_combined(pairs: &[(String, String)]) -> Vec<(String, String)> {
+    let mut names: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        if name == "set-cookie" {
+            for (k, v) in pairs.iter().filter(|(k, _)| k == "set-cookie") {
+                out.push((k.clone(), v.clone()));
+            }
+        } else {
+            let combined = pairs
+                .iter()
+                .filter(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push((name.to_string(), combined));
+        }
+    }
+    out
 }
 
 fn has(
@@ -200,7 +261,7 @@ fn for_each(
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue<v8::Value>,
 ) {
-    let pairs = read_pairs(scope, args.this());
+    let pairs = sorted_and_combined(&read_pairs(scope, args.this()));
     let Ok(callback): Result<v8::Local<v8::Function>, _> = args.get(0).try_into() else {
         crate::web::throw_type_error(scope, "forEach: callback must be a function");
         return;
@@ -219,8 +280,8 @@ fn entries(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue<v8::Value>,
 ) {
-    let mut pairs = read_pairs(scope, args.this());
-    pairs.sort_by(|a, b| a.0.cmp(&b.0)); // spec: iteration order is sorted by name
+    // Spec: iteration order is sorted by name, duplicates combined.
+    let pairs = sorted_and_combined(&read_pairs(scope, args.this()));
     let items: Vec<v8::Local<v8::Value>> = pairs
         .into_iter()
         .map(|(k, v)| {
@@ -238,8 +299,7 @@ fn keys(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue<v8::Value>,
 ) {
-    let mut pairs = read_pairs(scope, args.this());
-    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let pairs = sorted_and_combined(&read_pairs(scope, args.this()));
     let items: Vec<v8::Local<v8::Value>> = pairs
         .into_iter()
         .map(|(k, _)| v8::String::new(scope, &k).unwrap().into())
@@ -253,8 +313,7 @@ fn values(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue<v8::Value>,
 ) {
-    let mut pairs = read_pairs(scope, args.this());
-    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let pairs = sorted_and_combined(&read_pairs(scope, args.this()));
     let items: Vec<v8::Local<v8::Value>> = pairs
         .into_iter()
         .map(|(_, v)| v8::String::new(scope, &v).unwrap().into())

@@ -18,6 +18,27 @@ ureq = "3.3.0"
 data-url = "0.3.2"
 base64 = "0.22.1"
 
+# Subresource Integrity (import-map `integrity` field) — SHA-256 hashing of
+# fetched module bodies. Only sha256 is supported (spec allows sha384/sha512
+# too, but sha256 covers the common case).
+sha2 = "0.11"
+
+# WHATWG Encoding Standard legacy label table + decoders (same crate
+# Firefox/Servo use). TextDecoder routes all labels through this.
+encoding_rs = "0.8"
+
+# Async runtime — multi-thread so HTTP tasks run concurrently while the V8
+# isolate stays single-threaded on the main thread. The V8 thread never
+# enters the runtime; it only holds a Handle and spawns onto it.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+
+# Async HTTP client (replaces ureq for the fetch() global path; ureq stays
+# for the static-import module-load path which V8 forces synchronous).
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip", "brotli"] }
+
+# CancellationToken for setTimeout/setInterval cancellation.
+tokio-util = { version = "0.7", features = ["rt"] }
+
 [profile.release]
 lto = true
 codegen-units = 1

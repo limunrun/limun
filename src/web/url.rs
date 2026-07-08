@@ -70,19 +70,11 @@ fn resolve_args(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments) 
     let base = if args.length() > 1 && !args.get(1).is_undefined() {
         let base_arg = args.get(1);
         let base_str = if let Ok(obj) = <v8::Local<v8::Object>>::try_from(base_arg) {
-            if obj.internal_field_count() > 0 {
+            if native::is::<UrlInternal>(scope, obj, 0) {
                 // Another URL instance: read its href directly instead of
                 // going through JS's toString.
-                if let Some(field) = obj.get_internal_field(scope, 0) {
-                    if <v8::Local<v8::External>>::try_from(field).is_ok() {
-                        let internal: &UrlInternal = native::get(scope, obj, 0);
-                        Some(internal.url.borrow().as_str().to_string())
-                    } else {
-                        Some(base_arg.to_rust_string_lossy(scope))
-                    }
-                } else {
-                    Some(base_arg.to_rust_string_lossy(scope))
-                }
+                let internal: &UrlInternal = native::get(scope, obj, 0);
+                Some(internal.url.borrow().as_str().to_string())
             } else {
                 Some(base_arg.to_rust_string_lossy(scope))
             }
@@ -317,16 +309,32 @@ fn set_host(
     let s = value.to_rust_string_lossy(scope);
     let internal: &UrlInternal = native::get(scope, args.holder(), 0);
     let mut url = internal.url.borrow_mut();
-    // Simplified split (doesn't special-case bracketed IPv6 host:port).
-    match s.rsplit_once(':') {
-        Some((host, port_str)) if !host.is_empty() && port_str.chars().all(|c| c.is_ascii_digit()) => {
-            let _ = url.set_host(Some(host));
-            let port = port_str.parse::<u16>().ok();
-            let _ = url.set_port(port);
+    // Split host[:port], special-casing bracketed IPv6 literals like
+    // "[::1]:8080" — a naive rsplit_once(':') would split on a ':' inside
+    // the brackets. For a bracketed host, everything up to and including
+    // the closing ']' is the host (rust-url's set_host wants the brackets
+    // kept for IPv6); a ':' immediately after ']' begins the port.
+    let (host, port_str): (&str, Option<&str>) = if let Some(rest) = s.strip_prefix('[') {
+        match rest.find(']') {
+            Some(end) => {
+                // rest[end] == ']' maps to s[end + 1] == ']'.
+                let host_with_brackets = &s[..=end + 1];
+                let after = &s[end + 2..];
+                let port = after.strip_prefix(':').filter(|p| !p.is_empty());
+                (host_with_brackets, port)
+            }
+            None => (s.as_str(), None), // malformed — let set_host reject
         }
-        _ => {
-            let _ = url.set_host(Some(&s));
+    } else {
+        match s.rsplit_once(':') {
+            Some((h, p)) if !h.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (h, Some(p)),
+            _ => (s.as_str(), None),
         }
+    };
+    let _ = url.set_host(Some(host));
+    if let Some(p) = port_str {
+        let port = p.parse::<u16>().ok();
+        let _ = url.set_port(port);
     }
 }
 

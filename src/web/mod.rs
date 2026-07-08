@@ -6,10 +6,16 @@
 //! `window` itself: there is no browsing context here to name.
 
 pub mod base64;
+pub mod blob;
 pub mod console;
+pub mod dom_exception;
+pub mod event;
 pub mod fetch;
+pub mod form_data;
 mod native;
+pub mod performance;
 pub mod prompt;
+pub mod streams;
 pub mod text_encoding;
 pub mod timers;
 pub mod url;
@@ -18,6 +24,11 @@ pub mod url_search_params;
 /// Install all web-standard globals onto `context`'s global object.
 pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     let global = context.global(scope);
+
+    // Web IDL `DOMException` — installed first: `throw_dom_exception` (used
+    // by `atob`, `dispatchEvent`, `AbortSignal`, …) mints instances through
+    // it, so its constructor must be cached before anything can throw.
+    dom_exception::install(scope, global);
 
     console::install(scope, global);
 
@@ -61,6 +72,31 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     // Fetch Standard — `fetch` itself is a plain operation (enumerable);
     // `Headers`/`Response` are constructible classes (non-enumerable).
     fetch::install(scope, global);
+
+    // Streams Standard — `ReadableStream`/`ReadableStreamReader`
+    // (interface objects, non-enumerable). Used by `Response.body`.
+    streams::install(scope, global);
+
+    // File API + XHR Standard — `Blob`/`FormData` (interface objects,
+    // non-enumerable). `Blob` is used by `Response.blob()`; `FormData` by
+    // `Response.formData()`.
+    blob::install(scope, global);
+    form_data::install(scope, global);
+
+    // DOM Standard — `Event`/`CustomEvent`/`EventTarget`/
+    // `AbortController`/`AbortSignal` (interface objects, non-enumerable).
+    // Installed before `performance` because `performance` is constructed
+    // via the `EventTarget` machinery (`Performance : EventTarget`).
+    event::install(scope, global);
+
+    // High Resolution Time L3 — `performance` is a `[Replaceable]
+    // readonly attribute` on `WindowOrWorkerGlobalScope`, installed as
+    // an ordinary enumerable own property (verified shape in browsers:
+    // writable/configurable/enumerable all true). `Performance` extends
+    // `EventTarget`, so the singleton is built on top of the
+    // `EventTarget` machinery + the three spec members
+    // (`now`/`timeOrigin`/`toJSON`) as own properties.
+    performance::install(scope, global);
 }
 
 /// Install a platform global the way real engines do — own, writable,
@@ -101,19 +137,13 @@ pub fn throw_range_error(scope: &mut v8::PinScope, message: &str) {
     scope.throw_exception(exception);
 }
 
-/// `atob`/`btoa` throw a `DOMException` named e.g. "InvalidCharacterError"
-/// per spec. We don't have a real `DOMException` class (no DOM), so this
-/// throws a plain `Error` with `.name` set to match — same observable
-/// shape for the common case (`e.name === "InvalidCharacterError"`),
-/// documented simplification (see also: `Request` not implemented,
-/// TypeScript's `resolution-mode` import attribute out of scope).
+/// Throw a real `DOMException` with the given `name` (e.g.
+/// `"InvalidCharacterError"`, `"InvalidStateError"`). Used by `atob`,
+/// `dispatchEvent`, and anywhere the spec says "throw a `NameError`
+/// DOMException". The thrown value satisfies both
+/// `e instanceof DOMException` and `e instanceof Error`, and carries the
+/// legacy numeric `.code` where one exists.
 pub fn throw_dom_exception(scope: &mut v8::PinScope, name: &str, message: &str) {
-    let msg = v8::String::new(scope, message).unwrap();
-    let exception = v8::Exception::error(scope, msg);
-    if let Ok(obj) = <v8::Local<v8::Object>>::try_from(exception) {
-        let key = v8::String::new(scope, "name").unwrap();
-        let val = v8::String::new(scope, name).unwrap();
-        obj.set(scope, key.into(), val.into());
-    }
+    let exception = dom_exception::new_instance(scope, name, message);
     scope.throw_exception(exception);
 }

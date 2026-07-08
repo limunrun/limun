@@ -10,9 +10,14 @@
 //! on `(Url, ModuleKind)`, not just `Url`.
 
 use crate::core::exception::exception_text;
+use crate::core::import_map;
 use crate::core::io;
 use crate::core::resolver::resolve_specifier;
 use crate::core::state::{MODULE_URLS, REGISTRY, SYNTHETIC_EXPORTS};
+use crate::core::{permissions, runtime, state};
+use crate::core::bridge::TaskResult;
+use base64::Engine as _;
+use sha2::{Digest, Sha256};
 use url::Url;
 
 /// What a module's body actually is, selected by the `type` import
@@ -50,15 +55,40 @@ pub fn load_module<'s>(
         }
     };
 
+    load_module_from_source(scope, url, kind, &source_text)
+}
+
+/// Compile (or fetch from registry) a module from already-read source
+/// text. Split out of `load_module` so the async dynamic-import path
+/// (`finish_dynamic_import_from_source`) can reuse the compile/instantiate/
+/// register logic after fetching the body over the network on a tokio
+/// worker thread. Performs the integrity check against the supplied bytes.
+pub fn load_module_from_source<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    url: &Url,
+    kind: ModuleKind,
+    source_text: &str,
+) -> Option<v8::Local<'s, v8::Module>> {
+    let cache_key = (url.clone(), kind);
+    let cached = REGISTRY.with(|r| r.borrow().get(&cache_key).cloned());
+    if let Some(global) = cached {
+        return Some(v8::Local::new(scope, &global));
+    }
+
+    if let Err(e) = verify_integrity(url, source_text.as_bytes()) {
+        throw(scope, &e);
+        return None;
+    }
+
     let module = match kind {
-        ModuleKind::JavaScript => compile_js_module(scope, url, &source_text)?,
+        ModuleKind::JavaScript => compile_js_module(scope, url, source_text)?,
         ModuleKind::Json => {
-            let code = v8::String::new(scope, &source_text)?;
+            let code = v8::String::new(scope, source_text)?;
             let value = v8::json::parse(scope, code)?;
             create_synthetic_module(scope, url, value)
         }
         ModuleKind::Text => {
-            let value = v8::String::new(scope, &source_text)?.into();
+            let value = v8::String::new(scope, source_text)?.into();
             create_synthetic_module(scope, url, value)
         }
     };
@@ -157,6 +187,40 @@ fn read_source(url: &Url) -> Result<String, String> {
     }
 }
 
+/// Subresource Integrity check: if the import map declared an `integrity`
+/// value for `url`, hash `bytes` (SHA-256) and compare to the expected SRI
+/// string (`sha256-<base64>`). Only sha256 is supported — other algorithms
+/// are silently ignored (the entry has no effect). Returns `Ok(())` when
+/// there's no integrity entry for this URL, or when the hash matches.
+fn verify_integrity(url: &Url, bytes: &[u8]) -> Result<(), String> {
+    let Some(expected) = import_map::integrity_for(url) else {
+        return Ok(());
+    };
+    // SRI format: "<algo>-<base64>". We only enforce sha256; any other
+    // algorithm prefix is a no-op (documented limitation — spec also
+    // allows sha384/sha512, but sha256 covers the common case).
+    let Some((algo, expected_b64)) = expected.split_once('-') else {
+        return Err(format!(
+            "integrity check failed for {url}: bad SRI string \"{expected}\" (expected \"<algo>-<base64>\")"
+        ));
+    };
+    if algo != "sha256" {
+        // Unsupported algorithm — skip rather than fail. Matches the
+        // spirit of SRI (browsers ignore unknown algorithms too).
+        return Ok(());
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    let actual_b64 = base64::engine::general_purpose::STANDARD.encode(digest);
+    if actual_b64 != expected_b64 {
+        return Err(format!(
+            "integrity check failed for {url}: expected sha256-{expected_b64}, got sha256-{actual_b64}"
+        ));
+    }
+    Ok(())
+}
+
 /// Read the `type` import attribute out of a `FixedArray`, whose layout
 /// differs by call site (empirically verified against V8 15.0):
 ///   - static imports (`resolve_module_callback`): `[key, value, source_offset, ...]`
@@ -240,11 +304,14 @@ pub fn resolve_module_callback<'s>(
     }
 }
 
-/// V8 calls this for every dynamic `import()` expression. We load,
-/// instantiate, and evaluate synchronously (this runtime has no async I/O
-/// yet — even the network fetch in `read_source` blocks) and settle the
-/// returned promise immediately; that's spec-legal even though browsers
-/// usually settle it later.
+/// V8 calls this for every dynamic `import()` expression. We resolve the
+/// specifier and dispatch on scheme:
+///   - already-cached / `file` / `data` — synchronous load+eval, settle the
+///     promise inline (still spec-legal: browsers *may* settle sync).
+///   - `http`/`https` — spawn a tokio task to fetch the body; the promise
+///     stays pending until `event_loop::resolve_import` settles it after the
+///     bridge channel delivers the bytes. Two concurrent dynamic imports of
+///     remote modules run concurrently on the multi-thread runtime.
 pub fn dynamic_import_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     _host_defined_options: v8::Local<'s, v8::Data>,
@@ -273,18 +340,148 @@ pub fn dynamic_import_callback<'s>(
         .and_then(|s| Url::parse(&s).ok())
         .unwrap_or_else(current_dir_url);
 
-    match resolve_specifier(&specifier, &referrer_url).and_then(|url| load_and_run(scope, &url, kind)) {
-        Ok(namespace) => {
-            resolver.resolve(scope, namespace);
+    let url = match resolve_specifier(&specifier, &referrer_url) {
+        Ok(u) => u,
+        Err(msg) => {
+            let message = v8::String::new(scope, &msg).unwrap();
+            let exception = v8::Exception::type_error(scope, message);
+            resolver.reject(scope, exception);
+            return Some(promise);
         }
-        Err(message) => {
-            let message = v8::String::new(scope, &message).unwrap();
-            let exception = v8::Exception::error(scope, message);
+    };
+
+    // Fast path: already compiled (e.g. a static import of the same URL
+    // happened earlier). Resolve synchronously with the namespace.
+    let cache_key = (url.clone(), kind);
+    if REGISTRY.with(|r| r.borrow().get(&cache_key).is_some()) {
+        match load_and_run(scope, &url, kind) {
+            Ok(namespace) => {
+                let _ = resolver.resolve(scope, namespace);
+            }
+            Err(message) => {
+                let message = v8::String::new(scope, &message).unwrap();
+                let exception = v8::Exception::type_error(scope, message);
+                let _ = resolver.reject(scope, exception);
+            }
+        }
+        return Some(promise);
+    }
+
+    match url.scheme() {
+        "file" | "data" => {
+            // Synchronous load+eval — disk/data: are fast, low priority to
+            // async-ify.
+            match load_and_run(scope, &url, kind) {
+                Ok(namespace) => {
+                    let _ = resolver.resolve(scope, namespace);
+                }
+                Err(message) => {
+                    let message = v8::String::new(scope, &message).unwrap();
+                    let exception = v8::Exception::error(scope, message);
+                    let _ = resolver.reject(scope, exception);
+                }
+            }
+        }
+        "http" | "https" => {
+            // Permission gate inline — denied host rejects immediately.
+            if let Err(message) = permissions::check_net(&url) {
+                let message = v8::String::new(scope, &format!("import: {message}")).unwrap();
+                let exception = v8::Exception::type_error(scope, message);
+                resolver.reject(scope, exception);
+                return Some(promise);
+            }
+            let task_id = state::next_task_id();
+            let resolver_global = v8::Global::new(scope, resolver);
+            state::PENDING_TASKS.with(|p| {
+                p.borrow_mut().insert(
+                    task_id,
+                    state::PendingTask {
+                        resolver: resolver_global,
+                        kind: state::PendingKind::Import { url: url.clone(), kind },
+                    },
+                );
+            });
+            let url_clone = url.clone();
+            runtime::handle().spawn(async move {
+                let result = fetch_module_source(&url_clone).await;
+                let _ = runtime::tx().send(TaskResult::ImportSource {
+                    task_id,
+                    url: url_clone,
+                    kind,
+                    result,
+                });
+            });
+        }
+        scheme => {
+            let message = v8::String::new(
+                scope,
+                &format!(
+                    "cannot resolve \"{url}\": unsupported scheme \"{scheme}:\" (only file/http/https/data are supported)"
+                ),
+            )
+            .unwrap();
+            let exception = v8::Exception::type_error(scope, message);
             resolver.reject(scope, exception);
         }
     }
 
     Some(promise)
+}
+
+/// Plain-Rust async GET for http(s) dynamic `import()`. Runs on a tokio
+/// worker thread. Unlike `fetch()` global, a non-2xx is a hard error
+/// (modules don't have a "Response with `.ok === false`" representation —
+/// the import rejects).
+async fn fetch_module_source(url: &Url) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(|e| format!("cannot fetch {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("cannot fetch {url}: HTTP {}", resp.status()));
+    }
+    resp.text()
+        .await
+        .map_err(|e| format!("cannot read module body from {url}: {e}"))
+}
+
+/// Phase-2 of async dynamic import — called from `event_loop::resolve_import`
+/// on the V8 thread once the module body arrives over the bridge channel.
+/// Compiles, instantiates, and evaluates the module graph and returns its
+/// namespace object (or an error string for the rejection).
+pub fn finish_dynamic_import_from_source<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    url: &Url,
+    kind: ModuleKind,
+    source_text: &str,
+) -> Result<v8::Local<'s, v8::Value>, String> {
+    v8::tc_scope!(let tc, scope);
+
+    let module = load_module_from_source(tc, url, kind, source_text)
+        .ok_or_else(|| exception_text(tc))?;
+
+    if module.instantiate_module(tc, resolve_module_callback).is_none() {
+        return Err(exception_text(tc));
+    }
+
+    let _completion = module.evaluate(tc);
+
+    if module.get_status() == v8::ModuleStatus::Errored {
+        let exception = module.get_exception();
+        let text = exception
+            .to_string(tc)
+            .map(|s| s.to_rust_string_lossy(tc))
+            .unwrap_or_else(|| "<unprintable exception>".to_string());
+        return Err(text);
+    }
+
+    if tc.has_caught() {
+        return Err(exception_text(tc));
+    }
+
+    Ok(module.get_module_namespace())
 }
 
 /// Load + instantiate + evaluate a module graph, returning its namespace

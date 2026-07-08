@@ -65,9 +65,11 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
 
 /// Build a new `URLSearchParams` instance sharing `url_state` (used by
 /// `URL.prototype.searchParams`). Constructs via the real registered
-/// class (empty/standalone) then swaps its internal backing to `Linked` —
-/// the throwaway standalone `Vec` is leaked, same documented policy as
-/// `web::native`.
+/// class (empty/standalone) then overwrites the internal field with the
+/// `Linked` backing. The constructor's `Standalone` Vec and its
+/// `v8::External`/finalizer registration are both superseded by the
+/// second `store` call — the throwaway Vec is reclaimed by the finalizer
+/// registered for the `Linked` box when the JS object is collected.
 pub(crate) fn new_linked_instance<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     url_state: Rc<RefCell<Url>>,
@@ -113,13 +115,9 @@ fn parse_init(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments) ->
 
     // Another URLSearchParams instance: copy its current pairs.
     if let Ok(obj) = <v8::Local<v8::Object>>::try_from(arg) {
-        if obj.internal_field_count() > 0 {
-            if let Some(field) = obj.get_internal_field(scope, 0) {
-                if <v8::Local<v8::External>>::try_from(field).is_ok() {
-                    let backing: &ParamsBacking = native::get(scope, obj, 0);
-                    return read_pairs(backing);
-                }
-            }
+        if native::is::<ParamsBacking>(scope, obj, 0) {
+            let backing: &ParamsBacking = native::get(scope, obj, 0);
+            return read_pairs(backing);
         }
     }
 
