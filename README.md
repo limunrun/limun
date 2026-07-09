@@ -1,5 +1,11 @@
 # limun
 
+```
+Just LLM coding this, because I just want it to exist. It doesn't matter who makes it;
+I don't care about the impl details or performance. I have many other projects going on that I'm personally invested in,
+so this isn't that important. It just needs to exist. Years later I might actually start rewriting it myself piece by piece to create some sort of codebase shape I like, and for performance implications and stuff. Right now I only care about the runtime API and its shape.
+```
+
 Web-standard JS runtime. Node.js is a guest, not a landlord.
 
 Minimal V8 embed in Rust: real ESM modules with import maps, an event loop
