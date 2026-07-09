@@ -18,3 +18,12 @@ its not neccery at all. just follow the permissions in the limun.json file, dont
 
 and if also for workers we can have async callback fucntions or something like that, that lets worker ask host for permission on stuff.
 so we can show some ui or something in some apps with isolated plugins. if the callback not defined then dont ask for it.
+
+also access to legacy Node.js compat stuff should also be behind permission, something like `legacy?: boolean`.
+this includes things like:
+```ts
+Limun.legacy.require()
+Limun.legacy.fs // fs functions there are hard to wrap in a thin way (used by compat libraries)
+```
+
+we never mention Node.js in code, we just call it legacy.
