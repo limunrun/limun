@@ -53,6 +53,9 @@ fn main() -> ExitCode {
         eprintln!("limun: limun.json: {e}");
         return ExitCode::FAILURE;
     }
+    // The entry script is exempt from the `import` kill switch (the user
+    // invoked it explicitly) but still subject to the `io` pattern list.
+    core::permissions::set_entry(entry_url.clone());
 
     // --- tokio runtime boot (before V8 init) ---
     // Multi-thread so HTTP fetch tasks run concurrently while the V8 isolate

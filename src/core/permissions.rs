@@ -1,31 +1,73 @@
-//! Deno-style fs/net allowlists, configured in `./limun.json`'s
-//! `permissions` field rather than CLI flags:
+//! Unified IO permissions, configured in `./limun.json`'s `permissions`
+//! field. Everything that does IO is a URL — a local file is a `file:`
+//! URL, a remote module or `fetch()` target is an `https:` URL — so one
+//! pattern list covers all of it:
 //!
 //! ```json
 //! "permissions": {
-//!   "read": ["./examples/", "./limun.json"],
-//!   "net": ["esm.sh", "*.jsdelivr.net", "example.com:8080"]
+//!   "io": {
+//!     "./": { "read": true },
+//!     "https://esm.sh/": true,
+//!     "https://api.example.com:8080/v*/": { "read": true, "write": true }
+//!   },
+//!   "import": true,
+//!   "net": true,
+//!   "fs": true,
+//!   "legacy": false
 //! }
 //! ```
 //!
-//! Both `read`/`net` may also just be `true` (allow everything) or
-//! `false`/omitted (deny everything) instead of a list.
+//! ## `io` — the actual allowlist
 //!
-//! Gates the exact same two functions module loading already goes
-//! through (`core::io::read_file`/`core::io::fetch`) — see that module's
-//! doc comment. This means the entry script + every local/remote module
-//! it imports is *also* subject to these rules, same as a future
-//! `Limun.fs.*`/JS `fetch()` call would be — one gate, no exceptions.
+//! Keys are URL patterns; keys without `://` are file-path patterns,
+//! resolved against the current directory into `file:` URLs. Values are
+//! `true` (read+write), `false` (grants nothing — placeholder), or
+//! `{ read?, write? }` (missing fields grant nothing).
 //!
-//! Deliberately simpler than Deno's actual security model: no
-//! prompting, no distinguishing "module graph" net access from a
-//! runtime `fetch()` call, no CIDR ranges. And unlike Deno (secure by
-//! default, opt out via flags), an *absent* `permissions` key here
-//! defaults to allow-all — this is a config knob for constraining a
-//! deployment, not a zero-trust sandbox by default (that's a larger,
-//! separate feature). Once you *do* add a `permissions` key, each
-//! sub-domain (`read`/`net`) you don't mention defaults to deny, so it's
-//! still "secure once you opt in".
+//! Pattern syntax, matched against the *serialized* URL (lowercase
+//! scheme/host, default ports omitted):
+//! - `*`  — any run of characters except `/`
+//! - `?`  — any single character except `/`
+//! - `**` — any run of characters, `/` included
+//! - a trailing `/` is prefix-match sugar (equivalent to appending `**`)
+//!
+//! Grants are union-only and order-independent: an operation is allowed
+//! iff *some* matching entry grants its mode. No entry ever vetoes
+//! another — deny is simply the default for anything unmatched.
+//!
+//! ## `import` / `net` / `fs` — mechanism kill switches
+//!
+//! Plain booleans (default `true`) that close a whole mechanism
+//! regardless of `io` grants: `import` gates module loading (static and
+//! dynamic, local and remote — the entry script itself is exempt, since
+//! the user invoked it), `net` gates the `fetch()` global (and future
+//! network APIs), `fs` gates future `Limun.fs` / File System API
+//! surface. An operation must pass both its mechanism switch *and* the
+//! `io` list.
+//!
+//! ## `legacy` — capability opt-in
+//!
+//! Boolean (default `false`) gating the future `Limun.legacy.*` surface.
+//!
+//! ## Defaults
+//!
+//! No `limun.json` / no `permissions` key: allow-all (this is a config
+//! knob for constraining a deployment, not a zero-trust sandbox by
+//! default). Once a `permissions` key exists: an omitted `io` denies all
+//! IO, omitted switches stay open (`io` is the boundary; the switches
+//! only ever narrow), and `legacy` stays off.
+//!
+//! `data:` module specifiers are ungated: the bytes are embedded in the
+//! specifier itself (no IO happens, and the importing code was itself
+//! already granted), so neither the `import` switch nor the `io` list
+//! applies to them.
+//!
+//! There is deliberately no interactive prompting: prompting halts the
+//! program until a human finds the terminal. Anything not granted by
+//! `limun.json` is rejected, immediately and loudly.
+//!
+//! The old `permissions.read` / `permissions.net` array form is gone;
+//! its presence is a hard startup error pointing here.
 
 use serde_json::Value;
 use std::cell::RefCell;
@@ -33,22 +75,66 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use url::Url;
 
-#[derive(Clone)]
-enum Rule {
-    All,
-    None,
-    List(Vec<String>),
+/// Which runtime mechanism is performing the IO. Each has its own
+/// boolean kill switch; all share the one `io` pattern list.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mechanism {
+    /// Module loading — static or dynamic `import`, local or remote.
+    Import,
+    /// The `fetch()` global (and future network APIs).
+    Net,
+    /// Future `Limun.fs` / File System API surface. No call site yet —
+    /// the gate exists so fs surface lands pre-gated, not retrofitted.
+    #[allow(dead_code)]
+    Fs,
+}
+
+/// What the operation does to the target. Reads: loading a module,
+/// GET/HEAD/OPTIONS requests, reading a file. Writes: state-changing
+/// request methods (POST/PUT/DELETE/...), writing a file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Read,
+    Write,
+}
+
+struct IoEntry {
+    /// Normalized pattern: file-path keys converted to `file:` URL
+    /// patterns, trailing-`/` sugar expanded to `**`.
+    pattern: String,
+    read: bool,
+    write: bool,
 }
 
 struct Permissions {
-    read: Rule,
-    net: Rule,
+    /// `None` = no `permissions` key at all: allow everything.
+    /// `Some(entries)` = allowlist (possibly empty = deny all IO).
+    io: Option<Vec<IoEntry>>,
+    import_enabled: bool,
+    net_enabled: bool,
+    fs_enabled: bool,
+    legacy: bool,
 }
 
 thread_local! {
     static PERMISSIONS: RefCell<Permissions> = const {
-        RefCell::new(Permissions { read: Rule::All, net: Rule::All })
+        RefCell::new(Permissions {
+            io: None,
+            import_enabled: true,
+            net_enabled: true,
+            fs_enabled: true,
+            legacy: true, // allow-all default; flips to opt-in once a `permissions` key exists
+        })
     };
+    /// The entry script's URL — exempt from the `import` kill switch
+    /// (the user invoked it), still subject to the `io` list.
+    static ENTRY_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
+}
+
+/// Record the entry script's URL (called once from `main` before
+/// execution). See `ENTRY_URL`.
+pub fn set_entry(url: Url) {
+    ENTRY_URL.with(|e| *e.borrow_mut() = Some(url));
 }
 
 pub fn load() -> Result<(), String> {
@@ -62,89 +148,247 @@ pub fn load() -> Result<(), String> {
     };
     let obj = perm.as_object().ok_or("\"permissions\" must be an object")?;
 
-    let read = parse_rule(obj.get("read")).map_err(|e| format!("permissions.read: {e}"))?;
-    let net = parse_rule(obj.get("net")).map_err(|e| format!("permissions.net: {e}"))?;
+    // Old schema is a hard error, not a silent legacy path.
+    if obj.contains_key("read") {
+        return Err(
+            "permissions.read is gone — the read/net array form was replaced by the \
+             unified permissions.io pattern map (see src/core/permissions.rs)"
+                .to_string(),
+        );
+    }
+    if matches!(obj.get("net"), Some(Value::Array(_))) {
+        return Err(
+            "permissions.net is a boolean kill switch now — host allowlists moved to \
+             the unified permissions.io pattern map (see src/core/permissions.rs)"
+                .to_string(),
+        );
+    }
 
-    PERMISSIONS.with(|p| *p.borrow_mut() = Permissions { read, net });
+    for key in obj.keys() {
+        if !matches!(key.as_str(), "io" | "import" | "net" | "fs" | "legacy") {
+            return Err(format!(
+                "permissions.{key} is not a thing (known: io, import, net, fs, legacy)"
+            ));
+        }
+    }
+
+    let io = match obj.get("io") {
+        // `permissions` exists but `io` doesn't: deny all IO.
+        None => Vec::new(),
+        Some(v) => parse_io(v).map_err(|e| format!("permissions.io: {e}"))?,
+    };
+    let import_enabled = parse_switch(obj.get("import"), true)
+        .map_err(|e| format!("permissions.import: {e}"))?;
+    let net_enabled =
+        parse_switch(obj.get("net"), true).map_err(|e| format!("permissions.net: {e}"))?;
+    let fs_enabled =
+        parse_switch(obj.get("fs"), true).map_err(|e| format!("permissions.fs: {e}"))?;
+    let legacy =
+        parse_switch(obj.get("legacy"), false).map_err(|e| format!("permissions.legacy: {e}"))?;
+
+    PERMISSIONS.with(|p| {
+        *p.borrow_mut() = Permissions {
+            io: Some(io),
+            import_enabled,
+            net_enabled,
+            fs_enabled,
+            legacy,
+        }
+    });
     Ok(())
 }
 
-fn parse_rule(v: Option<&Value>) -> Result<Rule, String> {
+fn parse_switch(v: Option<&Value>, default: bool) -> Result<bool, String> {
     match v {
-        // Mentioned in "permissions" but this sub-domain isn't: deny.
-        None => Ok(Rule::None),
-        Some(Value::Bool(true)) => Ok(Rule::All),
-        Some(Value::Bool(false)) => Ok(Rule::None),
-        Some(Value::Array(items)) => {
-            let mut list = Vec::with_capacity(items.len());
-            for item in items {
-                let s = item.as_str().ok_or("entries must be strings")?;
-                list.push(s.to_string());
-            }
-            Ok(Rule::List(list))
-        }
-        Some(_) => Err("must be `true`, `false`, or an array of strings".to_string()),
+        None => Ok(default),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err("must be a boolean".to_string()),
     }
 }
 
-/// Check whether reading `path` off local disk is permitted.
-pub fn check_read(path: &Path) -> Result<(), String> {
-    PERMISSIONS.with(|p| match &p.borrow().read {
-        Rule::All => Ok(()),
-        Rule::None => Err(format!(
-            "read access to \"{}\" requires permission (add it to limun.json's permissions.read)",
-            path.display()
-        )),
-        Rule::List(entries) => {
-            let target = canonicalize_best_effort(path);
-            for entry in entries {
-                let entry_path = canonicalize_best_effort(Path::new(entry));
-                if target.starts_with(&entry_path) {
-                    return Ok(());
+fn parse_io(v: &Value) -> Result<Vec<IoEntry>, String> {
+    let obj = v
+        .as_object()
+        .ok_or("must be an object mapping URL/path patterns to grants")?;
+    let mut entries = Vec::with_capacity(obj.len());
+    for (key, value) in obj {
+        let (read, write) = match value {
+            Value::Bool(true) => (true, true),
+            Value::Bool(false) => (false, false), // grants nothing; placeholder
+            Value::Object(grant) => {
+                for k in grant.keys() {
+                    if !matches!(k.as_str(), "read" | "write") {
+                        return Err(format!("\"{key}\": unknown grant field \"{k}\""));
+                    }
                 }
+                let field = |name: &str| -> Result<bool, String> {
+                    match grant.get(name) {
+                        None => Ok(false),
+                        Some(Value::Bool(b)) => Ok(*b),
+                        Some(_) => Err(format!("\"{key}\": \"{name}\" must be a boolean")),
+                    }
+                };
+                (field("read")?, field("write")?)
             }
-            Err(format!(
-                "read access to \"{}\" is not permitted (not covered by limun.json's permissions.read)",
-                path.display()
-            ))
+            _ => {
+                return Err(format!(
+                    "\"{key}\": must be `true`, `false`, or {{ read?, write? }}"
+                ));
+            }
+        };
+        entries.push(IoEntry {
+            pattern: normalize_pattern(key),
+            read,
+            write,
+        });
+    }
+    Ok(entries)
+}
+
+/// Check whether `mechanism` may perform a `mode` operation on `url`.
+pub fn check(mechanism: Mechanism, url: &Url, mode: Mode) -> Result<(), String> {
+    PERMISSIONS.with(|p| {
+        let perms = p.borrow();
+
+        let (enabled, switch_name) = match mechanism {
+            Mechanism::Import => (perms.import_enabled, "import"),
+            Mechanism::Net => (perms.net_enabled, "net"),
+            Mechanism::Fs => (perms.fs_enabled, "fs"),
+        };
+        let is_entry = mechanism == Mechanism::Import
+            && ENTRY_URL.with(|e| e.borrow().as_ref() == Some(url));
+        if !enabled && !is_entry {
+            return Err(format!(
+                "{switch_name} is disabled (limun.json's permissions.{switch_name} is false)"
+            ));
+        }
+
+        let Some(entries) = &perms.io else {
+            return Ok(()); // no `permissions` key: allow-all
+        };
+        let target = url.as_str();
+        for entry in entries {
+            let granted = match mode {
+                Mode::Read => entry.read,
+                Mode::Write => entry.write,
+            };
+            if granted && glob_match(&entry.pattern, target) {
+                return Ok(());
+            }
+        }
+        let verb = match mode {
+            Mode::Read => "read",
+            Mode::Write => "write",
+        };
+        Err(format!(
+            "{verb} access to \"{target}\" is not permitted (no matching grant in \
+             limun.json's permissions.io)"
+        ))
+    })
+}
+
+/// Convenience: check a local-disk operation by `Path` (converted to a
+/// canonical `file:` URL first, so symlinks/`..` can't sidestep grants).
+pub fn check_file(mechanism: Mechanism, path: &Path, mode: Mode) -> Result<(), String> {
+    let abs = absolutize(path);
+    let url = Url::from_file_path(&abs)
+        .map_err(|_| format!("cannot form a file: URL from \"{}\"", abs.display()))?;
+    check(mechanism, &url, mode)
+}
+
+/// Check whether the (future) `Limun.legacy.*` surface may be used.
+/// No call site yet — the gate exists so `Limun.legacy` lands pre-gated.
+#[allow(dead_code)]
+pub fn check_legacy() -> Result<(), String> {
+    PERMISSIONS.with(|p| {
+        if p.borrow().legacy {
+            Ok(())
+        } else {
+            Err("Limun.legacy requires permission (set limun.json's permissions.legacy to true)"
+                .to_string())
         }
     })
 }
 
-/// Check whether a network request to `url` is permitted. Matches
-/// against `url`'s host, optionally exact-port-qualified
-/// (`"host:port"`) or subdomain-wildcarded (`"*.example.com"`).
-pub fn check_net(url: &Url) -> Result<(), String> {
-    PERMISSIONS.with(|p| match &p.borrow().net {
-        Rule::All => Ok(()),
-        Rule::None => Err(format!(
-            "network access to \"{url}\" requires permission (add it to limun.json's permissions.net)"
-        )),
-        Rule::List(entries) => {
-            let host = url.host_str().unwrap_or("");
-            let port = url.port_or_known_default();
-            for entry in entries {
-                if let Some((entry_host, entry_port)) = entry.rsplit_once(':') {
-                    if entry_host == host && port.map(|p| p.to_string()).as_deref() == Some(entry_port) {
-                        return Ok(());
-                    }
-                } else if entry == host {
-                    return Ok(());
-                } else if let Some(suffix) = entry.strip_prefix("*.") {
-                    if let Some(rest) = host.strip_suffix(suffix) {
-                        if rest.ends_with('.') {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-            Err(format!(
-                "network access to \"{url}\" is not permitted (not covered by limun.json's permissions.net)"
-            ))
-        }
-    })
+/// Turn a raw `io` key into a matchable pattern over serialized URLs.
+/// Keys containing `://` are already URL patterns; anything else is a
+/// file-path pattern, absolutized against the current directory. A
+/// trailing `/` becomes `/**` (prefix-match sugar).
+fn normalize_pattern(raw: &str) -> String {
+    let mut pattern = if raw.contains("://") {
+        raw.to_string()
+    } else {
+        path_pattern_to_url(raw)
+    };
+    if pattern.ends_with('/') {
+        pattern.push_str("**");
+    }
+    pattern
 }
 
-fn canonicalize_best_effort(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+/// Convert a file-path pattern to a `file:` URL pattern. The literal
+/// directory prefix (everything before the first glob character, up to
+/// its last `/`) is canonicalized so patterns and (canonicalized)
+/// targets agree on symlinks and `..`; the glob tail is appended as-is.
+fn path_pattern_to_url(raw: &str) -> String {
+    let glob_at = raw.find(['*', '?']).unwrap_or(raw.len());
+    let (literal, glob) = raw.split_at(glob_at);
+    let (dir, rest) = match literal.rfind('/') {
+        Some(i) => (&literal[..=i], &literal[i + 1..]),
+        None => ("./", literal),
+    };
+    let dir_abs = absolutize(Path::new(dir));
+    let mut pattern = match Url::from_directory_path(&dir_abs) {
+        Ok(u) => u.to_string(),
+        Err(()) => format!("file://{}/", dir_abs.display()),
+    };
+    pattern.push_str(rest);
+    pattern.push_str(glob);
+    pattern
+}
+
+/// Canonicalize if possible; otherwise make absolute against the current
+/// directory (a nonexistent path can still be denied/granted correctly).
+fn absolutize(path: &Path) -> PathBuf {
+    match fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(_) => {
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(path))
+                    .unwrap_or_else(|_| path.to_path_buf())
+            }
+        }
+    }
+}
+
+/// Minimal glob matcher: `*` = any run except `/`, `?` = one char except
+/// `/`, `**` = any run including `/`. Byte-wise (URLs are ASCII-serialized;
+/// multi-byte UTF-8 never contains ASCII bytes, so `*`/`**` runs stay
+/// correct and `?` simply won't match a non-ASCII char — fine for config).
+fn glob_match(pattern: &str, text: &str) -> bool {
+    matches_bytes(pattern.as_bytes(), text.as_bytes())
+}
+
+fn matches_bytes(p: &[u8], t: &[u8]) -> bool {
+    let Some(&head) = p.first() else {
+        return t.is_empty();
+    };
+    match head {
+        b'*' => {
+            if p.get(1) == Some(&b'*') {
+                // `**`: consume any run, `/` included.
+                (0..=t.len()).any(|i| matches_bytes(&p[2..], &t[i..]))
+            } else {
+                // `*`: consume any run that contains no `/`.
+                (0..=t.len())
+                    .take_while(|&i| i == 0 || t[i - 1] != b'/')
+                    .any(|i| matches_bytes(&p[1..], &t[i..]))
+            }
+        }
+        b'?' => !t.is_empty() && t[0] != b'/' && matches_bytes(&p[1..], &t[1..]),
+        c => t.first() == Some(&c) && matches_bytes(&p[1..], &t[1..]),
+    }
 }

@@ -177,9 +177,9 @@ fn read_source(url: &Url) -> Result<String, String> {
             let path = url
                 .to_file_path()
                 .map_err(|_| format!("invalid file URL: {url}"))?;
-            io::read_file(&path)
+            io::read_file(&path, permissions::Mechanism::Import)
         }
-        "http" | "https" => io::fetch(url),
+        "http" | "https" => io::fetch(url, permissions::Mechanism::Import),
         "data" => io::decode_data_url(url),
         scheme => Err(format!(
             "cannot resolve \"{url}\": unsupported scheme \"{scheme}:\" (only file/http/https/data are supported)"
@@ -383,8 +383,10 @@ pub fn dynamic_import_callback<'s>(
             }
         }
         "http" | "https" => {
-            // Permission gate inline — denied host rejects immediately.
-            if let Err(message) = permissions::check_net(&url) {
+            // Permission gate inline — a denied URL rejects immediately.
+            if let Err(message) =
+                permissions::check(permissions::Mechanism::Import, &url, permissions::Mode::Read)
+            {
                 let message = v8::String::new(scope, &format!("import: {message}")).unwrap();
                 let exception = v8::Exception::type_error(scope, message);
                 resolver.reject(scope, exception);

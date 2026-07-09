@@ -96,13 +96,6 @@ fn fetch(
         }
     };
 
-    // Permission gate is synchronous: a denied host rejects inline rather
-    // than spawning a task that would always reject.
-    if let Err(message) = permissions::check_net(&url) {
-        reject_type_error(scope, resolver, &format!("fetch: {message}"));
-        return;
-    }
-
     // `init` overrides (and may supply a `signal`, which wins over any
     // `Request`-inherited signal per spec).
     if args.length() > 1 {
@@ -147,6 +140,20 @@ fn fetch(
             resolver.reject(scope, reason);
             return;
         }
+    }
+
+    // Permission gate is synchronous: a denied URL rejects inline rather
+    // than spawning a task that would always reject. Sits after the
+    // `init` overrides because the *final* method decides the mode —
+    // safe methods only need a `read` grant, state-changing ones need
+    // `write`.
+    let mode = match method.as_str() {
+        "GET" | "HEAD" | "OPTIONS" => permissions::Mode::Read,
+        _ => permissions::Mode::Write,
+    };
+    if let Err(message) = permissions::check(permissions::Mechanism::Net, &url, mode) {
+        reject_type_error(scope, resolver, &format!("fetch: {message}"));
+        return;
     }
 
     // Register the pending task before spawning so the receive handler is

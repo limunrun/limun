@@ -11,7 +11,10 @@
         }
     },
     "permissions": {
-        "read": ["./"],
-        "net": ["esm.sh", "raw.githubusercontent.com"]
+        "io": {
+            "./": { "read": true },
+            "https://esm.sh/": { "read": true },
+            "https://raw.githubusercontent.com/": { "read": true }
+        }
     }
 }

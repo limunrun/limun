@@ -8,7 +8,7 @@ Explicitly **not** in scope (per discussion, don't re-add):
 - `npm:` specifiers, `blob:` module scheme
 - Node/Deno-style globals (`process.*`, `Deno.*`) in the core runtime
 - Import attribute `resolution-mode` (TypeScript-only, not our concern)
-- Permission system — considered done, no open issues
+- Permission system — redesigned to the unified `io` model (see pass below), no open issues
 
 ---
 
@@ -155,7 +155,13 @@ it's worth the surface-area cost.
 - `crypto` (Web Crypto — `crypto.getRandomValues`, `crypto.subtle.*`)
 - `structuredClone`
 - `Worker`/`MessagePort`/`BroadcastChannel` (multi-isolate; a real
-  architecture project, not a small addition)
+  architecture project, not a small addition). When it lands, worker
+  permissions per IDEAS: `new Worker(url, { limun: { permissions } })` —
+  an explicitly-set permissions object does NOT inherit the host's (empty
+  object = no permissions at all), but the host's grants always cap it
+  (worker ⊆ host, intersection). Optionally an async host callback the
+  worker can use to request extra grants at runtime (UI-mediated plugin
+  consent); absent callback = plain reject. Never CLI prompting.
 - `Intl` (internationalization — large surface, no current driver)
 - `URL.createObjectURL`/`revokeObjectURL` (no `Blob` URL store yet)
 - `WritableStream`/`TransformStream` (no driver without a pipe-to
@@ -168,7 +174,7 @@ it's worth the surface-area cost.
 ## Known limitations — working as intended, documenting for clarity
 
 - `TextEncoder` UTF-8-only — spec-correct, not a gap.
-- Permission system (`src/core/permissions.rs`) — considered complete.
+- Permission system (`src/core/permissions.rs`) — unified `io` model, considered complete.
 - `console` object formatting is flat `ToString` (no recursive
   inspector like Node's `util.inspect`) — cosmetic; revisit if real
   usage needs it.
@@ -224,6 +230,49 @@ hand against the pinned `rusty_v8` v150.0.0 source and crate metadata.
 - [x] `Headers.get()` combines duplicate values with `", "`; iteration is
   sort-and-combine; `getSetCookie()` added; `set-cookie` never combined.
 - [x] Dead `io::fetch_full`/`RawResponse` (+ `ureq::ResponseExt`) removed.
+
+---
+
+## IDEAS pass — unified `io` permission model
+
+The whole of IDEAS.md, implemented (worker-scoping parts deferred with the
+Worker item above, since workers don't exist yet). Same toolchain caveat as
+the post-GLM pass: no local Rust ≥1.85, so verified by hand against the
+sources, not compiled.
+
+- [x] **Unified `io` allowlist** (`src/core/permissions.rs` rewrite). One
+  pattern map over *URLs* replaces the separate `read` path list and `net`
+  host list — a local file is a `file:` URL, a remote target an `https:`
+  URL, not that different. Keys are glob patterns (`*` = any run except
+  `/`, `?` = one char except `/`, `**` = any run; trailing `/` = prefix
+  sugar); keys without `://` are file-path patterns absolutized +
+  canonicalized against cwd. Values: `true` | `false` | `{ read?, write? }`.
+  Grants are union-only and order-independent (serde_json's map is sorted,
+  so first-match-wins would be a lie); deny is the default for anything
+  unmatched.
+- [x] **Mechanism kill switches** — `import` / `net` / `fs` are plain
+  booleans (default `true`) that close a whole mechanism regardless of
+  `io` grants. The entry script is exempt from the `import` switch (you
+  invoked it) but still subject to the `io` list; `import: false` =
+  "entry runs alone". `data:` module specifiers are ungated entirely (no
+  IO — the bytes are in the specifier).
+- [x] **Mode-aware checks** — module loads and file reads are `read`;
+  `fetch()` needs `read` for GET/HEAD/OPTIONS and `write` for
+  state-changing methods. The fetch gate moved *after* `init` parsing so
+  the final method (not the pre-override one) picks the mode; still
+  synchronous-reject before any task spawns.
+- [x] **`legacy` permission** — boolean, default `false` once a
+  `permissions` key exists; `check_legacy()` gate ready for
+  `Limun.legacy.*` (which stays unbuilt).
+- [x] **No prompting, ever** — was already true, now documented as a
+  design decision: prompting halts the program until someone finds the
+  terminal. Not covered by limun.json = rejected, loudly.
+- [x] Old `permissions.read`/`net` array form is a hard startup error
+  pointing at the new schema (loud, not silently ignored); unknown
+  `permissions.*` / grant keys are errors too. Repo `limun.json` migrated.
+- [x] `core::io` gates are mechanism-parameterized
+  (`read_file(path, mech)` / `fetch(url, mech)`) so the one choke point
+  serves imports today and `Limun.fs` later without a second gate.
 
 Still open (unchanged from above, documented as intentional):
 - Fetch body is fully buffered then wrapped in a one-chunk stream — not true
