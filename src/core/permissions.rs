@@ -52,7 +52,7 @@
 //!
 //! ## `legacy` — capability opt-in
 //!
-//! Boolean (default `false`) gating the future `Limun.legacy.*` surface.
+//! Boolean (default `false`) gating the future `Limun.legacy.nodejs.*` surface.
 //!
 //! ## Defaults
 //!
@@ -335,15 +335,15 @@ pub fn check_file(path: &Path, mode: Mode) -> Result<(), String> {
     check(&url, mode)
 }
 
-/// Check whether the (future) `Limun.legacy.*` surface may be used.
-/// No call site yet — the gate exists so `Limun.legacy` lands pre-gated.
+/// Check whether the (future) `Limun.legacy.nodejs.*` surface may be used.
+/// No call site yet — the gate exists so `Limun.legacy.nodejs` lands pre-gated.
 #[allow(dead_code)]
 pub fn check_legacy() -> Result<(), String> {
     PERMISSIONS.with(|p| {
         if p.borrow().legacy {
             Ok(())
         } else {
-            Err("Limun.legacy requires permission (set limun.json's permissions.legacy to true)"
+            Err("Limun.legacy.nodejs requires permission (set limun.json's permissions.legacy to true)"
                 .to_string())
         }
     })

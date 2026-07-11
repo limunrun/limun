@@ -156,7 +156,7 @@ list.
 #### `legacy` — capability opt-in
 
 Boolean (default `false` once a `permissions` key exists) gating the
-`Limun.legacy.*` surface (Node compat).
+`Limun.legacy.nodejs.*` surface (Node compat).
 
 #### `data:` URLs
 
