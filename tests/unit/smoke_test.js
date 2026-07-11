@@ -96,41 +96,15 @@ console.groupEnd();
 console.group("modules: static import, relative resolution");
 // ---------------------------------------------------------------------
 {
-  const { greet } = await import("./greet.js");
+  const { greet } = await import("./fixtures/greet.js");
   check("relative import works", greet("modules") === "greetings from modules");
 }
 console.groupEnd();
 
 // ---------------------------------------------------------------------
-console.group("import maps: bare, prefix, scoped, blocked");
+// Import map / scope tests live in tests/limun/import_maps_test.js —
+// they're limun-specific, not web-standard.
 // ---------------------------------------------------------------------
-{
-  const { foo } = await import("foo");
-  check("bare specifier match", foo() === "resolved via limun.json import map");
-
-  const { greet: greetViaPrefix } = await import("examples/greet.js");
-  check("prefix specifier match", greetViaPrefix("prefix") === "greetings from prefix");
-
-  // This file lives under ./examples/, which is exactly the scopes[] key in
-  // limun.json — so the bare "bar" specifier resolves to scoped-bar.js here,
-  // NOT the top-level imports["bar"] (which points to plain bar.js).
-  const { bar } = await import("bar");
-  check("scoped override wins over top-level imports", bar() === "scoped bar (examples/ override)");
-
-  try {
-    await import("blocked-example");
-    check("blocked (null) specifier throws", false);
-  } catch (e) {
-    check("blocked (null) specifier throws", e.message.includes("blocked"));
-  }
-
-  try {
-    await import("totally-unknown-bare-specifier");
-    check("unknown bare specifier throws", false);
-  } catch (e) {
-    check("unknown bare specifier throws", true);
-  }
-}
 console.groupEnd();
 
 // ---------------------------------------------------------------------
@@ -138,13 +112,13 @@ console.group("dynamic import() + import.meta");
 // ---------------------------------------------------------------------
 {
   check("import.meta.url is a file: URL", import.meta.url.startsWith("file://"));
-  check("import.meta.url ends with this file", import.meta.url.endsWith("/test.js"));
+  check("import.meta.url ends with this file", import.meta.url.endsWith("/smoke_test.js"));
 
-  const resolved = import.meta.resolve("./greet.js");
-  const expected = new URL("./greet.js", import.meta.url).href;
+  const resolved = import.meta.resolve("./fixtures/greet.js");
+  const expected = new URL("./fixtures/greet.js", import.meta.url).href;
   check("import.meta.resolve works", resolved === expected);
 
-  const dynamicMod = await import("./greet.js");
+  const dynamicMod = await import("./fixtures/greet.js");
   check("dynamic import dedupes with static import", typeof dynamicMod.greet === "function");
 }
 console.groupEnd();
@@ -211,23 +185,23 @@ console.group("import attributes: with { type: \"json\" | \"text\" }");
 // ---------------------------------------------------------------------
 {
   // Static.
-  const jsonMod = await import("./data.json", { with: { type: "json" } });
+  const jsonMod = await import("./fixtures/data.json", { with: { type: "json" } });
   check("static-equivalent json import works", jsonMod.default.name === "Shiba" && jsonMod.default.count === 42 && jsonMod.default.nested.ok === true);
 
-  const textMod = await import("./note.txt", { with: { type: "text" } });
+  const textMod = await import("./fixtures/note.txt", { with: { type: "text" } });
   check("text import works", textMod.default.trim() === "hello from a text module");
 
   // Same URL, no attribute at all -> ordinary rules still apply elsewhere
   // (a .json file with no `type` attribute would fail to parse as JS, so we
   // don't test that path here — just confirming plain JS imports are
   // unaffected by any of this).
-  const { greet: stillPlainJs } = await import("./greet.js");
+  const { greet: stillPlainJs } = await import("./fixtures/greet.js");
   check("plain js imports unaffected", typeof stillPlainJs === "function");
 
   // JSON modules only ever have a single `default` export — a named import
   // should fail to link, exactly like a browser.
   try {
-    await import("./bad_named_json_import.js");
+    await import("./fixtures/bad_named_json_import.js");
     check("named import from json module rejected", false);
   } catch (e) {
     check("named import from json module rejected", e.message.includes("does not provide an export"));
@@ -235,7 +209,7 @@ console.group("import attributes: with { type: \"json\" | \"text\" }");
 
   // Unsupported attribute key -> TypeError (dynamic import).
   try {
-    await import("./greet.js", { with: { potato: "yes" } });
+    await import("./fixtures/greet.js", { with: { potato: "yes" } });
     check("unsupported attribute key throws", false);
   } catch (e) {
     check("unsupported attribute key throws", e instanceof TypeError);
@@ -243,7 +217,7 @@ console.group("import attributes: with { type: \"json\" | \"text\" }");
 
   // Unsupported `type` value -> TypeError (dynamic import).
   try {
-    await import("./greet.js", { with: { type: "css" } });
+    await import("./fixtures/greet.js", { with: { type: "css" } });
     check("unsupported type value throws", false);
   } catch (e) {
     check("unsupported type value throws", e instanceof TypeError);
@@ -251,8 +225,8 @@ console.group("import attributes: with { type: \"json\" | \"text\" }");
 
   // Same URL + different `type` = different module identity (spec
   // requirement — the cache key includes the attribute, not just the URL).
-  const asJson = await import("./data.json", { with: { type: "json" } });
-  const asText = await import("./data.json", { with: { type: "text" } });
+  const asJson = await import("./fixtures/data.json", { with: { type: "json" } });
+  const asText = await import("./fixtures/data.json", { with: { type: "text" } });
   check(
     "same URL, different type -> distinct modules",
     typeof asJson.default === "object" && typeof asText.default === "string"

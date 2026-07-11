@@ -151,7 +151,7 @@ fn fetch(
         "GET" | "HEAD" | "OPTIONS" => permissions::Mode::Read,
         _ => permissions::Mode::Write,
     };
-    if let Err(message) = permissions::check(permissions::Mechanism::Net, &url, mode) {
+    if let Err(message) = permissions::check(&url, mode) {
         reject_type_error(scope, resolver, &format!("fetch: {message}"));
         return;
     }

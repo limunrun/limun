@@ -6,23 +6,24 @@
 //! ```json
 //! "permissions": {
 //!   "io": {
-//!     "./": { "read": true },
-//!     "https://esm.sh/": true,
-//!     "https://api.example.com:8080/v*/": { "read": true, "write": true }
+//!     "default": true,
+//!     "https://evil.com/": { "read": false, "write": false },
+//!     "file://**": { "read": true }
 //!   },
-//!   "import": true,
-//!   "net": true,
-//!   "fs": true,
 //!   "legacy": false
 //! }
 //! ```
 //!
-//! ## `io` — the actual allowlist
+//! ## `io` — the allowlist
 //!
-//! Keys are URL patterns; keys without `://` are file-path patterns,
-//! resolved against the current directory into `file:` URLs. Values are
-//! `true` (read+write), `false` (grants nothing — placeholder), or
-//! `{ read?, write? }` (missing fields grant nothing).
+//! Keys are URL patterns (plus the special `"default"` key). Keys without
+//! `://` are file-path patterns, resolved against the current directory
+//! into `file:` URLs. The scheme in the pattern is the mechanism gate —
+//! `"file://**"` allows all disk IO, `"https://**"` allows all network IO.
+//! No separate kill switches needed; the pattern says what it says.
+//!
+//! Values are `true` (read+write), `false` (grants nothing — placeholder),
+//! or `{ read?, write? }`.
 //!
 //! Pattern syntax, matched against the *serialized* URL (lowercase
 //! scheme/host, default ports omitted):
@@ -31,19 +32,23 @@
 //! - `**` — any run of characters, `/` included
 //! - a trailing `/` is prefix-match sugar (equivalent to appending `**`)
 //!
+//! ## `default` — the fallback grant
+//!
+//! The special `"default"` key sets the grant for URLs that don't match any
+//! explicit pattern. It defaults to `false` (deny unmatched — whitelist
+//! mode). Set `"default": true` for blacklist mode: everything allowed
+//! except what you explicitly deny.
+//!
+//! Missing `read`/`write` fields in a pattern entry inherit from `default`
+//! — so `"https://api.example.com/": {}` with `"default": true` grants both
+//! read and write, while with `"default": false` (or absent) it grants
+//! neither.
+//!
 //! Grants are union-only and order-independent: an operation is allowed
-//! iff *some* matching entry grants its mode. No entry ever vetoes
-//! another — deny is simply the default for anything unmatched.
-//!
-//! ## `import` / `net` / `fs` — mechanism kill switches
-//!
-//! Plain booleans (default `true`) that close a whole mechanism
-//! regardless of `io` grants: `import` gates module loading (static and
-//! dynamic, local and remote — the entry script itself is exempt, since
-//! the user invoked it), `net` gates the `fetch()` global (and future
-//! network APIs), `fs` gates future `Limun.fs` / File System API
-//! surface. An operation must pass both its mechanism switch *and* the
-//! `io` list.
+//! iff *some* matching entry grants its mode (including inherited fields).
+//! No entry ever vetoes another — an explicit `false` only means "this
+//! entry doesn't grant"; it doesn't override a grant from another matching
+//! entry.
 //!
 //! ## `legacy` — capability opt-in
 //!
@@ -54,13 +59,16 @@
 //! No `limun.json` / no `permissions` key: allow-all (this is a config
 //! knob for constraining a deployment, not a zero-trust sandbox by
 //! default). Once a `permissions` key exists: an omitted `io` denies all
-//! IO, omitted switches stay open (`io` is the boundary; the switches
-//! only ever narrow), and `legacy` stays off.
+//! IO, and `legacy` stays off.
+//!
+//! The entry script is exempt from the `io` list (the user invoked it
+//! explicitly — it would be absurd to deny the very thing you asked to
+//! run). Everything else, including modules imported by the entry script,
+//! is subject to the `io` list.
 //!
 //! `data:` module specifiers are ungated: the bytes are embedded in the
 //! specifier itself (no IO happens, and the importing code was itself
-//! already granted), so neither the `import` switch nor the `io` list
-//! applies to them.
+//! already granted), so the `io` list doesn't apply to them.
 //!
 //! There is deliberately no interactive prompting: prompting halts the
 //! program until a human finds the terminal. Anything not granted by
@@ -75,20 +83,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use url::Url;
 
-/// Which runtime mechanism is performing the IO. Each has its own
-/// boolean kill switch; all share the one `io` pattern list.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Mechanism {
-    /// Module loading — static or dynamic `import`, local or remote.
-    Import,
-    /// The `fetch()` global (and future network APIs).
-    Net,
-    /// Future `Limun.fs` / File System API surface. No call site yet —
-    /// the gate exists so fs surface lands pre-gated, not retrofitted.
-    #[allow(dead_code)]
-    Fs,
-}
-
 /// What the operation does to the target. Reads: loading a module,
 /// GET/HEAD/OPTIONS requests, reading a file. Writes: state-changing
 /// request methods (POST/PUT/DELETE/...), writing a file.
@@ -102,17 +96,16 @@ struct IoEntry {
     /// Normalized pattern: file-path keys converted to `file:` URL
     /// patterns, trailing-`/` sugar expanded to `**`.
     pattern: String,
-    read: bool,
-    write: bool,
+    /// `None` = inherit from default.
+    read: Option<bool>,
+    /// `None` = inherit from default.
+    write: Option<bool>,
 }
 
 struct Permissions {
     /// `None` = no `permissions` key at all: allow everything.
-    /// `Some(entries)` = allowlist (possibly empty = deny all IO).
-    io: Option<Vec<IoEntry>>,
-    import_enabled: bool,
-    net_enabled: bool,
-    fs_enabled: bool,
+    /// `Some(entries)` = allowlist (possibly empty + default).
+    io: Option<(Vec<IoEntry>, bool)>,
     legacy: bool,
 }
 
@@ -120,14 +113,12 @@ thread_local! {
     static PERMISSIONS: RefCell<Permissions> = const {
         RefCell::new(Permissions {
             io: None,
-            import_enabled: true,
-            net_enabled: true,
-            fs_enabled: true,
             legacy: true, // allow-all default; flips to opt-in once a `permissions` key exists
         })
     };
-    /// The entry script's URL — exempt from the `import` kill switch
-    /// (the user invoked it), still subject to the `io` list.
+    /// The entry script's URL — exempt from the `io` list (the user
+    /// invoked it explicitly). Everything else, including modules it
+    /// imports, is subject to the allowlist.
     static ENTRY_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
 }
 
@@ -158,40 +149,40 @@ pub fn load() -> Result<(), String> {
     }
     if matches!(obj.get("net"), Some(Value::Array(_))) {
         return Err(
-            "permissions.net is a boolean kill switch now — host allowlists moved to \
-             the unified permissions.io pattern map (see src/core/permissions.rs)"
+            "permissions.net is gone — host allowlists moved to the unified \
+             permissions.io pattern map. Use \"https://**\" or similar instead \
+             (see src/core/permissions.rs)"
+                .to_string(),
+        );
+    }
+    if obj.contains_key("import") || obj.contains_key("fs") {
+        return Err(
+            "permissions.import / permissions.fs are gone — the scheme in the io \
+             pattern is the gate (e.g. \"file://**\" for disk, \"https://**\" for \
+             network). See src/core/permissions.rs"
                 .to_string(),
         );
     }
 
     for key in obj.keys() {
-        if !matches!(key.as_str(), "io" | "import" | "net" | "fs" | "legacy") {
+        if !matches!(key.as_str(), "io" | "legacy") {
             return Err(format!(
-                "permissions.{key} is not a thing (known: io, import, net, fs, legacy)"
+                "permissions.{key} is not a thing (known: io, legacy)"
             ));
         }
     }
 
     let io = match obj.get("io") {
-        // `permissions` exists but `io` doesn't: deny all IO.
-        None => Vec::new(),
+        // `permissions` exists but `io` doesn't: deny all IO (default false).
+        None => (Vec::new(), false),
         Some(v) => parse_io(v).map_err(|e| format!("permissions.io: {e}"))?,
     };
-    let import_enabled = parse_switch(obj.get("import"), true)
-        .map_err(|e| format!("permissions.import: {e}"))?;
-    let net_enabled =
-        parse_switch(obj.get("net"), true).map_err(|e| format!("permissions.net: {e}"))?;
-    let fs_enabled =
-        parse_switch(obj.get("fs"), true).map_err(|e| format!("permissions.fs: {e}"))?;
     let legacy =
         parse_switch(obj.get("legacy"), false).map_err(|e| format!("permissions.legacy: {e}"))?;
 
     PERMISSIONS.with(|p| {
         *p.borrow_mut() = Permissions {
             io: Some(io),
-            import_enabled,
-            net_enabled,
-            fs_enabled,
             legacy,
         }
     });
@@ -206,25 +197,51 @@ fn parse_switch(v: Option<&Value>, default: bool) -> Result<bool, String> {
     }
 }
 
-fn parse_io(v: &Value) -> Result<Vec<IoEntry>, String> {
+fn parse_io(v: &Value) -> Result<(Vec<IoEntry>, bool), String> {
     let obj = v
         .as_object()
         .ok_or("must be an object mapping URL/path patterns to grants")?;
-    let mut entries = Vec::with_capacity(obj.len());
+
+    // Extract the special "default" key before pattern parsing.
+    let mut default = false;
+    let mut entries = Vec::with_capacity(obj.len().saturating_sub(1));
     for (key, value) in obj {
+        if key == "default" {
+            default = match value {
+                Value::Bool(b) => *b,
+                Value::Object(grant) => {
+                    for k in grant.keys() {
+                        if !matches!(k.as_str(), "read" | "write") {
+                            return Err(format!("\"default\": unknown grant field \"{k}\""));
+                        }
+                    }
+                    let field = |name: &str| -> Result<bool, String> {
+                        match grant.get(name) {
+                            None => Ok(false),
+                            Some(Value::Bool(b)) => Ok(*b),
+                            Some(_) => Err(format!("\"default\": \"{name}\" must be a boolean")),
+                        }
+                    };
+                    field("read")? || field("write")?
+                }
+                _ => return Err("\"default\": must be `true`, `false`, or { read?, write? }".to_string()),
+            };
+            continue;
+        }
+
         let (read, write) = match value {
-            Value::Bool(true) => (true, true),
-            Value::Bool(false) => (false, false), // grants nothing; placeholder
+            Value::Bool(true) => (Some(true), Some(true)),
+            Value::Bool(false) => (Some(false), Some(false)),
             Value::Object(grant) => {
                 for k in grant.keys() {
                     if !matches!(k.as_str(), "read" | "write") {
                         return Err(format!("\"{key}\": unknown grant field \"{k}\""));
                     }
                 }
-                let field = |name: &str| -> Result<bool, String> {
+                let field = |name: &str| -> Result<Option<bool>, String> {
                     match grant.get(name) {
-                        None => Ok(false),
-                        Some(Value::Bool(b)) => Ok(*b),
+                        None => Ok(None),
+                        Some(Value::Bool(b)) => Ok(Some(*b)),
                         Some(_) => Err(format!("\"{key}\": \"{name}\" must be a boolean")),
                     }
                 };
@@ -242,58 +259,80 @@ fn parse_io(v: &Value) -> Result<Vec<IoEntry>, String> {
             write,
         });
     }
-    Ok(entries)
+    Ok((entries, default))
 }
 
-/// Check whether `mechanism` may perform a `mode` operation on `url`.
-pub fn check(mechanism: Mechanism, url: &Url, mode: Mode) -> Result<(), String> {
+/// Check whether a `mode` operation on `url` is permitted.
+///
+/// Semantics:
+/// 1. If any matching pattern explicitly sets this mode to `false` → deny.
+///    (Explicit deny wins — makes blacklist mode work with `default: true`.)
+/// 2. If any matching pattern explicitly sets this mode to `true` → allow.
+/// 3. If no matching pattern explicitly sets this mode → fall back to `default`.
+pub fn check(url: &Url, mode: Mode) -> Result<(), String> {
     PERMISSIONS.with(|p| {
         let perms = p.borrow();
 
-        let (enabled, switch_name) = match mechanism {
-            Mechanism::Import => (perms.import_enabled, "import"),
-            Mechanism::Net => (perms.net_enabled, "net"),
-            Mechanism::Fs => (perms.fs_enabled, "fs"),
-        };
-        let is_entry = mechanism == Mechanism::Import
-            && ENTRY_URL.with(|e| e.borrow().as_ref() == Some(url));
-        if !enabled && !is_entry {
-            return Err(format!(
-                "{switch_name} is disabled (limun.json's permissions.{switch_name} is false)"
-            ));
+        // The entry script is exempt from the io list.
+        let is_entry = ENTRY_URL.with(|e| e.borrow().as_ref() == Some(url));
+        if is_entry {
+            return Ok(());
         }
 
-        let Some(entries) = &perms.io else {
+        let Some((entries, default)) = &perms.io else {
             return Ok(()); // no `permissions` key: allow-all
         };
         let target = url.as_str();
+
+        let mut explicit = false;
         for entry in entries {
-            let granted = match mode {
-                Mode::Read => entry.read,
-                Mode::Write => entry.write,
-            };
-            if granted && glob_match(&entry.pattern, target) {
-                return Ok(());
+            if glob_match(&entry.pattern, target) {
+                let field = match mode {
+                    Mode::Read => &entry.read,
+                    Mode::Write => &entry.write,
+                };
+                if let Some(value) = field {
+                    if !value {
+                        // Explicit deny wins.
+                        let verb = match mode {
+                            Mode::Read => "read",
+                            Mode::Write => "write",
+                        };
+                        return Err(format!(
+                            "{verb} access to \"{target}\" is denied by \
+                             limun.json's permissions.io"
+                        ));
+                    }
+                    explicit = true;
+                }
             }
         }
-        let verb = match mode {
-            Mode::Read => "read",
-            Mode::Write => "write",
-        };
-        Err(format!(
-            "{verb} access to \"{target}\" is not permitted (no matching grant in \
-             limun.json's permissions.io)"
-        ))
+        if explicit {
+            return Ok(()); // matched, at least one explicitly granted, none denied.
+        }
+        // No explicit setting — fall back to default.
+        if *default {
+            Ok(())
+        } else {
+            let verb = match mode {
+                Mode::Read => "read",
+                Mode::Write => "write",
+            };
+            Err(format!(
+                "{verb} access to \"{target}\" is not permitted (no matching grant in \
+                 limun.json's permissions.io)"
+            ))
+        }
     })
 }
 
 /// Convenience: check a local-disk operation by `Path` (converted to a
 /// canonical `file:` URL first, so symlinks/`..` can't sidestep grants).
-pub fn check_file(mechanism: Mechanism, path: &Path, mode: Mode) -> Result<(), String> {
+pub fn check_file(path: &Path, mode: Mode) -> Result<(), String> {
     let abs = absolutize(path);
     let url = Url::from_file_path(&abs)
         .map_err(|_| format!("cannot form a file: URL from \"{}\"", abs.display()))?;
-    check(mechanism, &url, mode)
+    check(&url, mode)
 }
 
 /// Check whether the (future) `Limun.legacy.*` surface may be used.

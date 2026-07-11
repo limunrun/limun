@@ -12,7 +12,8 @@
     },
     "permissions": {
         "io": {
-            "./": { "read": true },
+            "default": false,
+            "file://**": { "read": true },
             "https://esm.sh/": { "read": true },
             "https://raw.githubusercontent.com/": { "read": true }
         }

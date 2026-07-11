@@ -1,1 +1,8 @@
 /target
+/AGENTS.md
+
+# Test suites — solo-cloned, not git submodules.
+# Pulled fresh on each repo clone (see .devcontainer/devcontainer.json).
+/tests/wpt/suite/
+/tests/node_compat/runner/suite/
+/tests/util/std/
