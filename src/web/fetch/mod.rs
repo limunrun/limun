@@ -28,10 +28,10 @@ pub mod request;
 pub mod response;
 
 use crate::core::bridge::{FetchPayload, TaskResult};
+use crate::core::ops;
 use crate::core::permissions;
 use crate::core::runtime;
 use crate::core::state::{PENDING_TASKS, PendingKind, PendingTask, next_task_id};
-use crate::web::event;
 use crate::web::native;
 
 use std::cell::RefCell;
@@ -134,8 +134,8 @@ fn fetch(
 
     // AbortSignal: pre-aborted → reject inline with the signal's reason, no spawn.
     if let Some(sig) = signal_obj {
-        if event::is_aborted(scope, sig) {
-            let reason = event::abort_reason(scope, sig)
+        if ops::abort_signal_is_aborted(scope, sig) {
+            let reason = ops::abort_signal_get_reason(scope, sig)
                 .unwrap_or_else(|| v8::undefined(scope).into());
             resolver.reject(scope, reason);
             return;
@@ -256,8 +256,10 @@ async fn do_fetch(
 
 thread_local! {
     /// Id counter + data table for the fetch-abort trampoline. Fresh
-    /// counter (disjoint from `event::NEXT_TRAMP_ID`) so the two never
-    /// collide. Entries are one-shot — removed on first fire.
+    /// counter (disjoint from any event-module trampoline — the event
+    /// module is now JS, so there's no longer a Rust counter there to
+    /// collide with) so ids never collide. Entries are one-shot —
+    /// removed on first fire.
     static NEXT_FETCH_ABORT_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static FETCH_ABORTS: RefCell<HashMap<usize, FetchAbortData>> = RefCell::new(HashMap::new());
 }
@@ -284,8 +286,8 @@ fn next_fetch_abort_id() -> usize {
 /// called as an `"abort"` listener on `signal`, removes the pending
 /// fetch task `task_id`, rejects its promise with the signal's reason,
 /// and cancels the tokio task. Then attach it to the signal via the
-/// shared `EventTarget` machinery (`add_abort_listener` — a `once`
-/// listener, so it auto-removes after firing).
+/// JS `AbortSignal`'s public `addEventListener` (`abort_signal_add_listener`
+/// — a `once` listener, so it auto-removes after firing).
 fn register_abort_listener(
     scope: &mut v8::PinScope,
     signal: v8::Local<v8::Object>,
@@ -308,7 +310,7 @@ fn register_abort_listener(
         .data(id_val)
         .build(scope)
         .unwrap();
-    event::add_abort_listener(scope, signal, func);
+    ops::abort_signal_add_listener(scope, signal, func);
 }
 
 fn fetch_abort_trampoline(
@@ -332,7 +334,7 @@ fn fetch_abort_trampoline(
         return;
     };
     let signal_local = v8::Local::new(scope, &data.signal);
-    let reason = event::abort_reason(scope, signal_local)
+    let reason = ops::abort_signal_get_reason(scope, signal_local)
         .unwrap_or_else(|| v8::undefined(scope).into());
     let resolver = v8::Local::new(scope, &task.resolver);
     let _ = resolver.reject(scope, reason);

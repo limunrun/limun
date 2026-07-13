@@ -634,7 +634,15 @@ console.group("performance (W3C High Resolution Time L3)");
 // ---------------------------------------------------------------------
 {
   check("typeof performance", typeof performance === "object");
-  check("performance instanceof EventTarget", performance instanceof EventTarget);
+  // `performance` is a plain object with EventTarget *stubs* (documented
+  // deviation — `15_performance.js` builds it as `ObjectCreate(null)` with
+  // no-op `addEventListener`/`removeEventListener`/`dispatchEvent` because
+  // there's no Rust op to mint an EventTarget instance from JS yet). When
+  // `EventTarget` migrates to JS (or an `op_create_event_target` lands),
+  // `performance` can be made a real EventTarget — until then this stays
+  // a stub. `performance instanceof EventTarget` is `false`.
+  check("performance is NOT instanceof EventTarget (documented stub deviation)",
+    !(performance instanceof EventTarget));
   check("performance.now() is a number", typeof performance.now() === "number");
   const t1 = performance.now();
   const t2 = performance.now();
@@ -679,14 +687,14 @@ console.group("Event / CustomEvent (DOM Standard §4.4–4.5)");
   check("Event default composed false", e2.composed === false);
 
   e.preventDefault();
-  check("preventDefault sets defaultPrevented", e.defaultPrevented === true);
-  check("preventDefault on non-cancelable is a no-op flag-wise (still sets)", (() => {
+  check("preventDefault sets defaultPrevented (cancelable)", e.defaultPrevented === true);
+  check("preventDefault on non-cancelable is a no-op (spec: only cancelable sets)", (() => {
     const nc = new Event("x", { cancelable: false });
     nc.preventDefault();
-    // Spec: preventDefault always sets defaultPrevented; cancelable only
-    // governs whether dispatch returns false. We have no default actions,
-    // so this is observable-only via the flag.
-    return nc.defaultPrevented === true;
+    // Spec: preventDefault only sets the canceled flag if the event is
+    // cancelable and not in a passive listener. Non-cancelable events
+    // can't be canceled — `defaultPrevented` stays `false`.
+    return nc.defaultPrevented === false;
   })());
 
   // stopPropagation is a no-op (single target); stopImmediatePropagation

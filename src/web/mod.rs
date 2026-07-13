@@ -7,7 +7,6 @@
 
 pub mod blob;
 pub mod dom_exception;
-pub mod event;
 pub mod fetch;
 pub mod form_data;
 mod native;
@@ -98,14 +97,21 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
 
     // DOM Standard — `Event`/`CustomEvent`/`EventTarget`/
     // `AbortController`/`AbortSignal` (interface objects, non-enumerable).
-    event::install(scope, global);
+    // Installed by the JS module `ext:limun/02_event.js` during
+    // bootstrap (real constructible classes). The JS layer owns the spec
+    // surface (listener dispatch, `on<event>` handler attributes,
+    // `AbortSignal.any()`/`timeout()`/`abort()`); the flat Rust ops
+    // (`op_abort_signal_is_aborted`/`op_abort_signal_get_reason`/
+    // `op_abort_signal_add_listener` in `core::ops`) are thin bridges
+    // so `fetch()` can read an `AbortSignal`'s state and register abort
+    // listeners without reaching into JS private symbols.
 
     // High Resolution Time L3 — `performance` is installed by the JS module
     // `ext:limun/15_performance.js` during bootstrap (an enumerable own
     // property on `globalThis`, matching browsers). The flat Rust ops
     // (`op_now`, `op_time_origin`) live in `core::ops`; the clock anchors
-    // (`now_value`/`time_origin_value`, also used by `web::event` for
-    // `Event.timeStamp`) live in `web::performance`.
+    // (`now_value`/`time_origin_value`, also used by `02_event.js` for
+    // `Event.timeStamp` via the `op_now` op) live in `web::performance`.
 }
 
 /// Install a platform global the way real engines do — own, writable,
@@ -135,11 +141,16 @@ pub fn throw_range_error(scope: &mut v8::PinScope, message: &str) {
 }
 
 /// Throw a real `DOMException` with the given `name` (e.g.
-/// `"InvalidCharacterError"`, `"InvalidStateError"`). Used by `atob`,
-/// `dispatchEvent`, and anywhere the spec says "throw a `NameError`
-/// DOMException". The thrown value satisfies both
-/// `e instanceof DOMException` and `e instanceof Error`, and carries the
-/// legacy numeric `.code` where one exists.
+/// `"InvalidCharacterError"`, `"InvalidStateError"`). The thrown value
+/// satisfies both `e instanceof DOMException` and `e instanceof Error`,
+/// and carries the legacy numeric `.code` where one exists.
+///
+/// Currently unused (the previous caller, `web::event`'s `dispatchEvent`
+/// validation, migrated to JS where DOMException is thrown directly).
+/// Retained for the next Rust caller that needs a DOMException throw —
+/// the JS class is cached by `dom_exception::cache_ctor` after bootstrap,
+/// so this is ready to use.
+#[allow(dead_code)]
 pub fn throw_dom_exception(scope: &mut v8::PinScope, name: &str, message: &str) {
     let exception = dom_exception::new_instance(scope, name, message);
     scope.throw_exception(exception);

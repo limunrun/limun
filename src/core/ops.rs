@@ -53,6 +53,14 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     set_fn(scope, ops, "op_prompt_prompt", op_prompt_prompt);
     set_fn(scope, ops, "op_prompt_is_tty", op_prompt_is_tty);
 
+    // AbortSignal bridge ops — let Rust callers (fetch) read the JS-defined
+    // `AbortSignal`'s state and register abort listeners without reaching
+    // into JS private symbols. The JS class owns the spec surface; these
+    // ops are thin bridges that call the public getters / `addEventListener`.
+    set_fn(scope, ops, "op_abort_signal_is_aborted", op_abort_signal_is_aborted);
+    set_fn(scope, ops, "op_abort_signal_get_reason", op_abort_signal_get_reason);
+    set_fn(scope, ops, "op_abort_signal_add_listener", op_abort_signal_add_listener);
+
     crate::web::set_global(scope, global, "__limunOps", ops.into());
 }
 
@@ -642,8 +650,8 @@ fn op_queue_microtask(
 // interface shape, `toJSON`) lives in `ext:limun/15_performance.js`; these
 // ops are flat clock reads — the irreducible native work (accessing the
 // monotonic + wall clocks). The clock anchors themselves live in
-// `web::performance` (shared with `web::event` for `Event.timeStamp`, which
-// calls `performance::now_value()` directly — Rust→Rust, no op round-trip).
+// `web::performance` (shared with `02_event.js` for `Event.timeStamp`,
+// which calls `op_now` at construction time).
 
 /// `op_now() -> f64` — monotonic milliseconds since the time origin
 /// (first clock access). Backs `performance.now()`. Never decreases
@@ -773,4 +781,143 @@ fn read_line() -> Option<String> {
         Ok(_) => Some(buf),
         Err(_) => None,
     }
+}
+
+// --- AbortSignal bridge ops ----------------------------------------------
+//
+// The `AbortSignal` class is defined in JS (`ext:limun/02_event.js`); its
+// state (`aborted`/`reason`) lives in private JS symbols. Rust callers
+// (fetch, for cancellation) need to (a) check whether a signal object is
+// aborted, (b) read its reason, and (c) register a native callback that
+// fires when the signal aborts. Rather than expose the private symbols or
+// duplicate state in a Rust table, these ops bridge by calling the JS
+// public getters / `addEventListener` from within the op. The signal is
+// passed as the first argument; the op re-enters JS via a `tc_scope!` to
+// read `signal.aborted` / `signal.reason` or call
+// `signal.addEventListener("abort", cb, {once:true})`.
+//
+// `op_abort_signal_add_listener` captures the callback as a
+// `Global<Function>` so it survives across the op boundary; the JS
+// `addEventListener` stores it in the listener map and dispatches it when
+// the abort event fires (same path as any user-registered listener).
+//
+// The `pub(crate)` helpers below the op wrappers let Rust callers (fetch)
+// bridge without a `__limunOps` lookup round-trip — they take `Local`s
+// directly and call the JS getters / `addEventListener` via a `tc_scope`.
+
+/// `op_abort_signal_is_aborted(signal: object) -> bool` — read the JS
+/// `signal.aborted` getter. Returns `false` if `signal` isn't an object
+/// or the getter throws / returns a non-boolean.
+fn op_abort_signal_is_aborted(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let Ok(signal) = <v8::Local<v8::Object>>::try_from(args.get(0)) else {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    };
+    let aborted = abort_signal_is_aborted(scope, signal);
+    rv.set(v8::Boolean::new(scope, aborted).into());
+}
+
+/// `op_abort_signal_get_reason(signal: object) -> value` — read the JS
+/// `signal.reason` getter. Returns `undefined` if `signal` isn't an
+/// object or the getter throws.
+fn op_abort_signal_get_reason(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let Ok(signal) = <v8::Local<v8::Object>>::try_from(args.get(0)) else {
+        rv.set(v8::undefined(scope).into());
+        return;
+    };
+    let reason = abort_signal_get_reason(scope, signal).unwrap_or_else(|| v8::undefined(scope).into());
+    rv.set(reason);
+}
+
+/// `op_abort_signal_add_listener(signal: object, callback: Function) ->
+/// undefined` — register `callback` as a one-shot `"abort"` listener on
+/// the JS `signal` via its public `addEventListener`. Used by fetch to
+/// wire cancellation: the callback removes the pending task, rejects the
+/// promise, and cancels the tokio task.
+fn op_abort_signal_add_listener(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let Ok(signal) = <v8::Local<v8::Object>>::try_from(args.get(0)) else {
+        rv.set(v8::undefined(scope).into());
+        return;
+    };
+    let Ok(callback) = <v8::Local<v8::Function>>::try_from(args.get(1)) else {
+        rv.set(v8::undefined(scope).into());
+        return;
+    };
+    abort_signal_add_listener(scope, signal, callback);
+    rv.set(v8::undefined(scope).into());
+}
+
+// --- AbortSignal bridge helpers (pub(crate) — callable from fetch) --------
+
+/// Read the JS `signal.aborted` getter. Returns `false` if the getter
+/// throws or `signal` isn't a valid object. Re-enters JS via a `tc_scope`
+/// to invoke the getter — the JS class owns the state in a private
+/// symbol; this is the only way to read it from Rust.
+pub(crate) fn abort_signal_is_aborted(
+    scope: &mut v8::PinScope,
+    signal: v8::Local<v8::Object>,
+) -> bool {
+    v8::tc_scope!(let tc, scope);
+    let key = v8::String::new(tc, "aborted").unwrap();
+    let v = signal.get(tc, key.into()).unwrap_or_else(|| v8::Boolean::new(tc, false).into());
+    let aborted = v.boolean_value(tc);
+    if tc.has_caught() { tc.reset(); }
+    aborted
+}
+
+/// Read the JS `signal.reason` getter. Returns `None` if the getter
+/// throws or `signal` isn't a valid object. The returned `Local<Value>`
+/// is the abort reason (any JS value — `DOMException`, `Error`, string,
+/// `undefined` for a non-aborted signal).
+pub(crate) fn abort_signal_get_reason<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    signal: v8::Local<v8::Object>,
+) -> Option<v8::Local<'s, v8::Value>> {
+    v8::tc_scope!(let tc, scope);
+    let key = v8::String::new(tc, "reason").unwrap();
+    let v = signal.get(tc, key.into());
+    if tc.has_caught() {
+        tc.reset();
+        return None;
+    }
+    v
+}
+
+/// Register `callback` as a one-shot `"abort"` listener on the JS
+/// `signal` via its public `addEventListener`. Re-enters JS to call
+/// `signal.addEventListener("abort", callback, {once:true})`. Used by
+/// `fetch()` to wire cancellation: the callback removes the pending
+/// task, rejects the promise, and cancels the tokio task.
+pub(crate) fn abort_signal_add_listener(
+    scope: &mut v8::PinScope,
+    signal: v8::Local<v8::Object>,
+    callback: v8::Local<v8::Function>,
+) {
+    v8::tc_scope!(let tc, scope);
+    let ael_key = v8::String::new(tc, "addEventListener").unwrap();
+    let Some(ael) = signal.get(tc, ael_key.into()) else {
+        return;
+    };
+    let Ok(ael_fn) = <v8::Local<v8::Function>>::try_from(ael) else {
+        return;
+    };
+    let type_key = v8::String::new(tc, "abort").unwrap();
+    // `{ once: true }` — the listener auto-removes after firing.
+    let opts = v8::Object::new(tc);
+    let once_key = v8::String::new(tc, "once").unwrap();
+    opts.set(tc, once_key.into(), v8::Boolean::new(tc, true).into());
+    let _ = ael_fn.call(tc, signal.into(), &[type_key.into(), callback.into(), opts.into()]);
+    if tc.has_caught() { tc.reset(); }
 }

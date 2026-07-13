@@ -5,10 +5,10 @@
 //!
 //!   - `core::ops::op_now` / `core::ops::op_time_origin` — flat ops called
 //!     from the JS module to read the clocks.
-//!   - `web::event` — `Event.timeStamp` calls `now_value()` directly
-//!     (Rust→Rust, no op round-trip needed; same clock as
-//!     `performance.now()` so an event constructed at the same instant
-//!     observes the same value).
+//!   - `ext:limun/02_event.js` — `Event.timeStamp` calls `op_now()` (which
+//!     calls `now_value()`) at construction time (Rust→Rust under the op
+//!     boundary; same clock as `performance.now()` so an event constructed
+//!     at the same instant observes the same value).
 //!
 //! Time sources (per spec §2.1):
 //!   - `now()` uses the monotonic clock (`std::time::Instant`) — never
@@ -53,9 +53,9 @@ fn ensure_origin() -> (Instant, f64) {
 }
 
 /// The raw monotonic-ms-since-origin value backing `performance.now()`
-/// — also used by `web::event` for `Event.timeStamp` (same clock, so
-/// an event constructed at the same instant as a `performance.now()`
-/// call observes the same value).
+/// — also used by `02_event.js` for `Event.timeStamp` (via the `op_now`
+/// op; same clock, so an event constructed at the same instant as a
+/// `performance.now()` call observes the same value).
 pub fn now_value() -> f64 {
     let (origin, _) = ensure_origin();
     origin.elapsed().as_secs_f64() * 1000.0

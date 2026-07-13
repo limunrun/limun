@@ -51,14 +51,11 @@ progress across subagents and context compactions.
 - [x] timers (JS port, 3 ops: op_timer_schedule/clear/queue_microtask)
 - [x] performance (JS port, 2 ops: op_now/op_time_origin; EventTarget stubbed)
 - [x] prompt (JS port, 4 ops: op_prompt_is_tty/alert/confirm/prompt)
-- [ ] event (Event/EventTarget/AbortController/AbortSignal)
-- [ ] text_encoding (TextEncoder/TextDecoder)
+- [x] event (Event/CustomEvent/EventTarget/AbortController/AbortSignal) — 459/459, bugs #1 and #3 fixed
 - [ ] url / url_search_params
-- [ ] timers
 - [ ] fetch/* (fetch, Headers, Response, Request)
 - [ ] blob / form_data
 - [ ] streams
-- [ ] prompt (alert/confirm/prompt)
 
 ## Core verification
 - [ ] Verify src/core/ (event loop, module/resolver, permissions, io, exceptions, rejections)

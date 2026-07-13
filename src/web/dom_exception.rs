@@ -42,10 +42,11 @@ pub fn cache_ctor(scope: &mut v8::PinScope) {
 }
 
 /// Build a `DOMException` from Rust by calling the cached JS constructor.
-/// Used by `throw_dom_exception` and by `AbortSignal` (whose default
-/// abort reason is an `"AbortError"` DOMException). Returns a bare V8
-/// `Error` if the constructor isn't cached yet (only reachable if
-/// something throws before `cache_ctor` ran).
+/// Used by `throw_dom_exception` and (previously) by `AbortSignal` (whose
+/// default abort reason is now minted in JS). Returns a bare V8 `Error`
+/// if the constructor isn't cached yet (only reachable if something
+/// throws before `cache_ctor` ran).
+#[allow(dead_code)]
 pub fn new_instance<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     name: &str,
