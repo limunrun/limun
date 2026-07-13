@@ -6,14 +6,10 @@
 //! available.
 //!
 //! Note: `resolve_module_callback`/`dynamic_import_callback` recognize an
-//! `ext:limun/…` specifier regardless of the referrer — there is currently
-//! no check that the importer is itself internal. In practice this doesn't
-//! grant extra capability (an `ext:` module only exposes what's already a
-//! global, and importing one just re-evaluates/returns the same cached
-//! module namespace everything else sees), but it means a user/remote
-//! module *can* `import "ext:limun/…"` directly today rather than only
-//! through the bootstrap sequence. Restricting this to internal referrers
-//! only is a hardening task for later, not a migration requirement.
+//! `ext:limun/…` specifier only when the referrer is itself an internal
+//! module (its URL starts with `ext:limun/`). User/remote modules cannot
+//! `import "ext:limun/…"` — the resolution throws a TypeError. This
+//! prevents user code from reaching into internal APIs directly.
 //!
 //! The registry is a static `&[(specifier, source)]` slice built at compile
 //! time. `resolve_specifier` + `source_for` are the two entry points the

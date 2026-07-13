@@ -289,9 +289,25 @@ pub fn resolve_module_callback<'s>(
     let specifier = specifier.to_rust_string_lossy(scope);
 
     // Internal `ext:` modules bypass the IO/permission path — they're
-    // embedded in the binary (see `internal_js`). The bootstrap sequence
-    // (and internal modules importing each other) name them directly.
+    // embedded in the binary (see `internal_js`). Only internal modules
+    // (whose own URL is `ext:limun/…`) may resolve `ext:` specifiers —
+    // user/remote modules cannot `import "ext:limun/…"`.
     if internal_js::is_internal(&specifier) {
+        let referrer_is_internal = MODULE_URLS
+            .with(|d| {
+                d.borrow()
+                    .get(&referrer.get_identity_hash().get())
+                    .is_some_and(|url| internal_js::is_internal(url.as_str()))
+            });
+        if !referrer_is_internal {
+            throw_syntax(
+                scope,
+                &format!(
+                    "Cannot import \"{specifier}\": `ext:` specifiers are internal and cannot be imported from user code"
+                ),
+            );
+            return None;
+        }
         return load_internal(scope, &specifier);
     }
 
@@ -353,11 +369,25 @@ pub fn dynamic_import_callback<'s>(
     let specifier = specifier.to_rust_string_lossy(scope);
 
     // Internal `ext:` modules via dynamic `import()` — same short-circuit
-    // as the static path. Internal modules are trusted/ungated; user code
-    // reaching an `ext:` specifier here is unusual but not blocked (the
-    // specifiers are embedded in the binary, so there's no privilege
-    // boundary to enforce — they're just internal APIs).
+    // as the static path. Only internal modules (whose own URL is
+    // `ext:limun/…`) may resolve `ext:` specifiers — user/remote modules
+    // cannot `import("ext:limun/…")`.
     if internal_js::is_internal(&specifier) {
+        let referrer_is_internal = resource_name
+            .to_string(scope)
+            .is_some_and(|s| internal_js::is_internal(&s.to_rust_string_lossy(scope)));
+        if !referrer_is_internal {
+            let msg = v8::String::new(
+                scope,
+                &format!(
+                    "Cannot import \"{specifier}\": `ext:` specifiers are internal and cannot be imported from user code"
+                ),
+            )
+            .unwrap();
+            let exception = v8::Exception::type_error(scope, msg);
+            resolver.reject(scope, exception);
+            return Some(promise);
+        }
         let resolver = v8::PromiseResolver::new(scope)?;
         let promise = resolver.get_promise(scope);
         v8::tc_scope!(let tc, scope);

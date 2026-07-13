@@ -410,6 +410,16 @@ fn fire_timer(scope: &mut v8::PinScope, id: u32) {
                 }
             });
         }
+    } else {
+        // One-shot timer: clean up any stale CANCELLED entry so that a
+        // `clearTimeout(id)` call *after* the timer already fired does
+        // not leak an entry in CANCELLED forever. `clear()` inserts into
+        // CANCELLED when the id isn't in TIMERS (already fired); without
+        // this cleanup, long-running processes with a cleanup-always-
+        // clears pattern would grow CANCELLED unboundedly.
+        CANCELLED.with(|c| {
+            c.borrow_mut().remove(&id);
+        });
     }
 }
 

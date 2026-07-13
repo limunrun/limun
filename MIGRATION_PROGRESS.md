@@ -338,6 +338,29 @@ WPT: 3 body suites added (`fetch/api/body/formdata.any.js`,
 `mime-type.any.js`, `textstream.any.js`). **2156/2160** (shared with 3e).
 Build clean 0 warnings; all unit/infra tests pass.
 
+## Post-migration cleanup — Item 4: Core hardening ✅ DONE
+
+### 4a. ext: referrer check
+
+`src/core/module.rs`: `resolve_module_callback` and `dynamic_import_callback`
+now check that the referrer is itself an internal module (URL starts with
+`ext:limun/`) before resolving an `ext:limun/…` specifier. User/remote modules
+that `import "ext:limun/…"` (static or dynamic) get a TypeError. Verified: both
+static and dynamic ext: imports from user code are blocked.
+
+`src/core/internal_js.rs`: doc comment updated to reflect the enforced
+referrer check.
+
+### 4b. clearTimeout/Interval CANCELLED leak fix
+
+`src/core/event_loop.rs`: `fire_timer` now cleans up the `CANCELLED` set for
+one-shot timers (no `repeat`) after they fire — `CANCELLED.remove(&id)`.
+Previously, `clear(id)` on an already-fired one-shot inserted the id into
+`CANCELLED` (because the timer was already removed from `TIMERS`), and nothing
+ever removed it — unbounded growth in long-running processes with a
+cleanup-always-clears pattern. Now the stale entry is cleaned up when the
+timer fires, bounding `CANCELLED` to only currently-firing timers.
+
 ## Notes
 - Build: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo build`
 - WPT: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo run -- tests/wpt/run.js`
