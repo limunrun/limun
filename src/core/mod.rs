@@ -96,6 +96,13 @@ pub fn execute(isolate: &mut v8::Isolate, entry: &Url) -> ExitCode {
         }
     }
 
+    // Cache the JS-defined `DOMException` constructor for Rust callers
+    // (`throw_dom_exception`, `AbortSignal`'s default abort reason). The
+    // class was installed on `globalThis` by `ext:limun/01_dom_exception.js`
+    // in the loop above; stash a `v8::Global` so `new_instance` can mint
+    // instances without a `globalThis` lookup.
+    web::dom_exception::cache_ctor(tc);
+
     // The entry point is always plain JS — import attributes only make
     // sense on an `import` statement/expression, and there's no such thing
     // for the script you hand to `limun` on the command line.

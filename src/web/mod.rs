@@ -24,10 +24,13 @@ pub mod url_search_params;
 pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     let global = context.global(scope);
 
-    // Web IDL `DOMException` — installed first: `throw_dom_exception` (used
-    // by `atob`, `dispatchEvent`, `AbortSignal`, …) mints instances through
-    // it, so its constructor must be cached before anything can throw.
-    dom_exception::install(scope, global);
+    // `DOMException` is installed by the JS module
+    // `ext:limun/01_dom_exception.js` during bootstrap (a constructible
+    // class, non-enumerable global). Its constructor is cached into a
+    // Rust thread_local by `dom_exception::cache_ctor` after the JS
+    // bootstrap loop runs (see `core::mod::execute`) — Rust callers
+    // (`throw_dom_exception`, `AbortSignal`'s default abort reason) mint
+    // instances through that cached ctor.
 
     console::install(scope, global);
 
