@@ -53,6 +53,10 @@ pub static REGISTRY: &[InternalModule] = &[
         source: include_str!("../js/01_dom_exception.js"),
     },
     InternalModule {
+        specifier: "ext:limun/00_url.js",
+        source: include_str!("../js/00_url.js"),
+    },
+    InternalModule {
         specifier: "ext:limun/01_console.js",
         source: include_str!("../js/01_console.js"),
     },

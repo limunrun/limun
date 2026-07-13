@@ -61,6 +61,20 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     set_fn(scope, ops, "op_abort_signal_get_reason", op_abort_signal_get_reason);
     set_fn(scope, ops, "op_abort_signal_add_listener", op_abort_signal_add_listener);
 
+    // URL Standard ops — parse/reparse/serialize + search-params helpers.
+    // The spec surface (the `URL`/`URLSearchParams` classes, getters,
+    // setters, live linkage, WebIDL argument validation) lives in the JS
+    // module `ext:limun/00_url.js`; these ops are the irreducible native
+    // work (the `url` crate's parser, which is the same one Servo/Firefox
+    // use). Flat: strings + a `Uint32Array` scratch buffer in, number
+    // (status) / string out.
+    set_fn(scope, ops, "op_url_parse", op_url_parse);
+    set_fn(scope, ops, "op_url_parse_with_base", op_url_parse_with_base);
+    set_fn(scope, ops, "op_url_get_serialization", op_url_get_serialization);
+    set_fn(scope, ops, "op_url_reparse", op_url_reparse);
+    set_fn(scope, ops, "op_url_parse_search_params", op_url_parse_search_params);
+    set_fn(scope, ops, "op_url_stringify_search_params", op_url_stringify_search_params);
+
     crate::web::set_global(scope, global, "__limunOps", ops.into());
 }
 
@@ -920,4 +934,276 @@ pub(crate) fn abort_signal_add_listener(
     opts.set(tc, once_key.into(), v8::Boolean::new(tc, true).into());
     let _ = ael_fn.call(tc, signal.into(), &[type_key.into(), callback.into(), opts.into()]);
     if tc.has_caught() { tc.reset(); }
+}
+
+// --- URL Standard ops -------------------------------------------------------
+//
+// WHATWG URL Standard `URL`/`URLSearchParams` backing ops. The spec surface
+// (the class shapes, getters, setters, live `searchParams` linkage, WebIDL
+// argument validation, `canParse`/`parse` static methods) lives in the JS
+// module `ext:limun/00_url.js`; these ops are the irreducible native work —
+// the `url` crate's parser (rust-url, same one Servo/Firefox use).
+//
+// Ports Deno's `ext/web/url.rs` ops, adapted to Limun's flat-op model (no
+// `op2`, no `OpState`, no `#[buffer]` macro). The JS side passes a
+// `Uint32Array` scratch buffer (`componentsBuf`, 8 elements) as one of the
+// args; the op writes the 8 internal component offsets into it and returns
+// a status number:
+//   0 = Ok            — parse succeeded, serialization == input href (the
+//                       JS side can use the input href as-is).
+//   1 = OkSerialization — parse succeeded, serialization != input href; the
+//                       serialized string is stashed in a thread-local and
+//                       the JS side fetches it via `op_url_get_serialization`.
+//   2 = Err           — parse failed (the JS side throws TypeError).
+//
+// The thread-local `URL_SERIALIZATION` stash mirrors Deno's
+// `state.put(UrlSerialization(…))` — the *only* way to carry a String from
+// the parse op to the JS side without an extra return slot. It's
+// single-slot (overwritten on each parse/reparse), which is safe because
+// the JS side calls `op_url_get_serialization` immediately after a
+// `OkSerialization` status, before any other parse op runs.
+//
+// `op_url_parse_search_params` / `op_url_stringify_search_params` handle
+// the `application/x-www-form-urlencoded` parse/serialize. The parse op
+// returns a flat `v8::Array` of `[key, value]` string-pairs (a data-only
+// array — no spec-observable V8 object crosses the boundary, just strings
+// in a list). The stringify op takes the same shape back and produces the
+// serialized query string. This matches Deno's
+// `Vec<(String, String)>` in/out, just built by hand (no serde_v8).
+//
+// Setter codes (must match the JS `SET_*` constants):
+//   0=hash 1=host 2=hostname 3=password 4=pathname 5=port 6=protocol
+//   7=search 8=username.
+
+// `URL_SERIALIZATION` — thread-local stash for the serialized URL when it
+// differs from the input href (status `OkSerialization`). Single slot —
+// see the section comment above on why that's safe.
+thread_local! {
+    static URL_SERIALIZATION: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Status codes returned by `op_url_parse` / `op_url_parse_with_base` /
+/// `op_url_reparse`.
+const URL_OK: u32 = 0;
+const URL_OK_SERIALIZATION: u32 = 1;
+const URL_ERR: u32 = 2;
+
+/// `NO_PORT` sentinel — a port cannot exceed 2^16-1, so 65536 means "no
+/// port". Matches Deno's `NO_PORT` constant and the JS-side `NO_PORT`.
+const NO_PORT: u32 = 65536;
+
+/// Write the 8 internal component offsets of `url` into the `Uint32Array`
+/// scratch buffer `buf` (passed as arg `buf_idx`). Returns `URL_OK` if
+/// `url`'s serialization equals `href` (the JS side can reuse the input),
+/// or `URL_OK_SERIALIZATION` after stashing the serialization in the
+/// thread-local. Caller passes the raw `href` so we can compare without
+/// re-serializing a `&Url`.
+fn fill_components_and_status(
+    url: &::url::Url,
+    href: &str,
+    buf: v8::Local<v8::ArrayBufferView>,
+) -> u32 {
+    let inner = ::url::quirks::internal_components(url);
+    // SAFETY: `buf` is a `Uint32Array` with ≥8 elements (the JS side
+    // allocates `new Uint32Array(8)` once and reuses it). `data()` returns
+    // a pointer to the view's storage (byte_offset already applied). We
+    // write 8 u32s = 32 bytes, which fits the 32-byte view.
+    let ptr = buf.data() as *mut u32;
+    unsafe {
+        *ptr.add(0) = inner.scheme_end;
+        *ptr.add(1) = inner.username_end;
+        *ptr.add(2) = inner.host_start;
+        *ptr.add(3) = inner.host_end;
+        *ptr.add(4) = inner.port.map(|p| p as u32).unwrap_or(NO_PORT);
+        *ptr.add(5) = inner.path_start;
+        *ptr.add(6) = inner.query_start.unwrap_or(0);
+        *ptr.add(7) = inner.fragment_start.unwrap_or(0);
+    }
+    let serialization: String = url.to_string();
+    if serialization == href {
+        URL_OK
+    } else {
+        URL_SERIALIZATION.with(|s| *s.borrow_mut() = Some(serialization));
+        URL_OK_SERIALIZATION
+    }
+}
+
+/// Read the `Uint32Array` scratch buffer from args at index `buf_idx`.
+/// Returns `None` if the arg isn't a typed array view (a JS-layer bug, not
+/// a user error — the JS side always passes `componentsBuf`).
+fn get_components_buf<'a>(
+    args: &'a v8::FunctionCallbackArguments<'a>,
+    buf_idx: i32,
+) -> Option<v8::Local<'a, v8::ArrayBufferView>> {
+    <v8::Local<v8::ArrayBufferView>>::try_from(args.get(buf_idx)).ok()
+}
+
+/// `op_url_parse(href: String, buf: Uint32Array) -> u32` — parse `href`
+/// with no base URL. Fills `buf` with the 8 component offsets and returns a
+/// status code (see the section comment). On parse failure returns
+/// `URL_ERR` (no components written, no stash set).
+fn op_url_parse(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let href = args.get(0).to_rust_string_lossy(scope);
+    let Some(buf) = get_components_buf(&args, 1) else {
+        rv.set(v8::Number::new(scope, URL_ERR as f64).into());
+        return;
+    };
+    match ::url::Url::parse(&href) {
+        Ok(url) => {
+            let status = fill_components_and_status(&url, &href, buf);
+            rv.set(v8::Number::new(scope, status as f64).into());
+        }
+        Err(_) => {
+            rv.set(v8::Number::new(scope, URL_ERR as f64).into());
+        }
+    }
+}
+
+/// `op_url_parse_with_base(href: String, base: String, buf: Uint32Array)
+/// -> u32` — parse `href` against `base`. Same status convention as
+/// `op_url_parse`. If `base` itself fails to parse, returns `URL_ERR`.
+fn op_url_parse_with_base(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let href = args.get(0).to_rust_string_lossy(scope);
+    let base_str = args.get(1).to_rust_string_lossy(scope);
+    let Some(buf) = get_components_buf(&args, 2) else {
+        rv.set(v8::Number::new(scope, URL_ERR as f64).into());
+        return;
+    };
+    let Ok(base_url) = ::url::Url::parse(&base_str) else {
+        rv.set(v8::Number::new(scope, URL_ERR as f64).into());
+        return;
+    };
+    match ::url::Url::options().base_url(Some(&base_url)).parse(&href) {
+        Ok(url) => {
+            let status = fill_components_and_status(&url, &href, buf);
+            rv.set(v8::Number::new(scope, status as f64).into());
+        }
+        Err(_) => {
+            rv.set(v8::Number::new(scope, URL_ERR as f64).into());
+        }
+    }
+}
+
+/// `op_url_get_serialization() -> String` — return the stashed
+/// serialization from the last `OkSerialization` parse/reparse, then clear
+/// the stash. Called by the JS side immediately after a `OkSerialization`
+/// status. Returns the empty string if the stash is empty (shouldn't
+/// happen in correct use, but be safe).
+fn op_url_get_serialization(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let s = URL_SERIALIZATION.with(|cell| cell.borrow_mut().take()).unwrap_or_default();
+    rv.set(v8::String::new(scope, &s).unwrap().into());
+}
+
+/// `op_url_reparse(href: String, setter: u32, value: String, buf:
+/// Uint32Array) -> u32` — re-parse `href`, apply the component `setter` with
+/// `value`, fill `buf` with the new component offsets, and return a
+/// status. `setter` is one of the `UrlSetter` codes (0–8). For setters
+/// that can fail (`host`/`hostname`/`password`/`port`/`protocol`/
+/// `username`), a failure returns `URL_ERR` (spec: component setters
+/// silently no-op on failure — the JS side catches and ignores). For
+/// `hash`/`pathname`/`search` (which can't fail), always returns `URL_OK`
+/// or `URL_OK_SERIALIZATION`.
+fn op_url_reparse(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let href = args.get(0).to_rust_string_lossy(scope);
+    let setter = args.get(1).uint32_value(scope).unwrap_or(99) as u8;
+    let value = args.get(2).to_rust_string_lossy(scope);
+    let Some(buf) = get_components_buf(&args, 3) else {
+        rv.set(v8::Number::new(scope, URL_ERR as f64).into());
+        return;
+    };
+
+    let Ok(mut url) = ::url::Url::parse(&href) else {
+        rv.set(v8::Number::new(scope, URL_ERR as f64).into());
+        return;
+    };
+
+    use ::url::quirks;
+    let result: Result<(), ()> = match setter {
+        0 => { quirks::set_hash(&mut url, &value); Ok(()) }          // hash
+        1 => quirks::set_host(&mut url, &value),                      // host
+        2 => quirks::set_hostname(&mut url, &value),                  // hostname
+        3 => quirks::set_password(&mut url, &value),                  // password
+        4 => { quirks::set_pathname(&mut url, &value); Ok(()) }       // pathname
+        5 => quirks::set_port(&mut url, &value),                      // port
+        6 => quirks::set_protocol(&mut url, &value),                  // protocol
+        7 => { quirks::set_search(&mut url, &value); Ok(()) }        // search
+        8 => quirks::set_username(&mut url, &value),                  // username
+        _ => Err(()),
+    };
+
+    if result.is_err() {
+        rv.set(v8::Number::new(scope, URL_ERR as f64).into());
+        return;
+    }
+    let status = fill_components_and_status(&url, &href, buf);
+    rv.set(v8::Number::new(scope, status as f64).into());
+}
+
+/// `op_url_parse_search_params(query: String) -> Array<[String, String]>`
+/// — parse `query` (a query string, no leading `?`) as
+/// `application/x-www-form-urlencoded` and return a flat `v8::Array` of
+/// `[key, value]` string-pairs. The JS side reads it as an array of
+/// 2-element string arrays. Empty query → empty array.
+fn op_url_parse_search_params(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let query = args.get(0).to_rust_string_lossy(scope);
+    let pairs: Vec<(String, String)> = ::url::form_urlencoded::parse(query.as_bytes())
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+
+    let arr = v8::Array::new(scope, pairs.len() as i32);
+    for (i, (k, v)) in pairs.into_iter().enumerate() {
+        let pair = v8::Array::new(scope, 2);
+        let k_str = v8::String::new(scope, &k).unwrap();
+        let v_str = v8::String::new(scope, &v).unwrap();
+        pair.set_index(scope, 0, k_str.into());
+        pair.set_index(scope, 1, v_str.into());
+        arr.set_index(scope, i as u32, pair.into());
+    }
+    rv.set(arr.into());
+}
+
+/// `op_url_stringify_search_params(pairs: Array<[String, String]>) ->
+/// String` — serialize `pairs` (a `v8::Array` of `[key, value]` string
+/// pairs) as `application/x-www-form-urlencoded` and return the query
+/// string (no leading `?`). The JS side passes its `_list` array directly.
+fn op_url_stringify_search_params(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let Ok(arr) = <v8::Local<v8::Array>>::try_from(args.get(0)) else {
+        rv.set(v8::String::new(scope, "").unwrap().into());
+        return;
+    };
+    let len = arr.length();
+    let mut ser = ::url::form_urlencoded::Serializer::new(String::new());
+    for i in 0..len {
+        let Some(pair_val) = arr.get_index(scope, i) else { continue };
+        let Ok(pair) = <v8::Local<v8::Array>>::try_from(pair_val) else { continue };
+        let k = pair.get_index(scope, 0).map(|v| v.to_rust_string_lossy(scope)).unwrap_or_default();
+        let v = pair.get_index(scope, 1).map(|v| v.to_rust_string_lossy(scope)).unwrap_or_default();
+        ser.append_pair(&k, &v);
+    }
+    let out = ser.finish();
+    rv.set(v8::String::new(scope, &out).unwrap().into());
 }

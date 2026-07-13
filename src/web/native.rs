@@ -1,8 +1,7 @@
 //! Shared helper for stashing native Rust state inside a V8 object's
 //! internal field (used by every real constructible class with per-instance
-//! state — `URL`, `URLSearchParams`, `Headers`, `TextDecoder`, `Response`,
-//! `Request`, `Blob`, `FormData`, `ReadableStream`, `Event`, `EventTarget`,
-//! `AbortSignal`, …).
+//! state — `Headers`, `TextDecoder`, `Response`, `Request`, `Blob`,
+//! `FormData`, `ReadableStream`, `Event`, `EventTarget`, `AbortSignal`, …).
 //!
 //! # Type-tagged storage (brand safety)
 //! Every stored value is boxed inside a `#[repr(C)]` `NativeCell<T>` whose
@@ -12,8 +11,8 @@
 //! foreign object's field and compare it without knowing `T` up front —
 //! which is what makes cross-class brand checks (`is_blob_instance`,
 //! `is_request_instance`, …) sound. Two different native classes both
-//! storing an `External` in field 0 (e.g. `URL` and `Response`) no longer
-//! alias: their tags differ, so `is::<UrlInternal>` is false for a
+//! storing an `External` in field 0 (e.g. `Blob` and `Response`) no longer
+//! alias: their tags differ, so `is::<Blob>` is false for a
 //! `Response` and [`get`] refuses to reinterpret one as the other.
 //!
 //! # Lifetime

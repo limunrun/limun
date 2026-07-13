@@ -12,8 +12,6 @@ pub mod form_data;
 mod native;
 pub mod performance;
 pub mod streams;
-pub mod url;
-pub mod url_search_params;
 
 /// Install all web-standard globals onto `context`'s global object.
 pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
@@ -77,9 +75,16 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     // types); the Rust ops `op_base64_atob`/`op_base64_btoa` (registered in
     // `core::ops`) are flat encode/decode.
 
-    // URL Standard — real constructible classes, non-enumerable.
-    url::install(scope, global);
-    url_search_params::install(scope, global);
+    // URL Standard — `URL`/`URLSearchParams` installed by the JS module
+    // `ext:limun/00_url.js` during bootstrap (real constructible classes,
+    // non-enumerable — matches Node/Deno/browsers). The JS layer owns the
+    // spec surface (class shapes, getters/setters, live `searchParams`
+    // linkage, WebIDL argument validation, `canParse`/`parse` static
+    // methods, iterator protocol); the flat Rust ops
+    // (`op_url_parse`/`op_url_parse_with_base`/`op_url_get_serialization`/
+    // `op_url_reparse`/`op_url_parse_search_params`/
+    // `op_url_stringify_search_params`) in `core::ops` do the irreducible
+    // native work (the `url` crate's parser).
 
     // Fetch Standard — `fetch` itself is a plain operation (enumerable);
     // `Headers`/`Response` are constructible classes (non-enumerable).

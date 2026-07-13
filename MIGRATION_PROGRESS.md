@@ -52,7 +52,7 @@ progress across subagents and context compactions.
 - [x] performance (JS port, 2 ops: op_now/op_time_origin; EventTarget stubbed)
 - [x] prompt (JS port, 4 ops: op_prompt_is_tty/alert/confirm/prompt)
 - [x] event (Event/CustomEvent/EventTarget/AbortController/AbortSignal) — 459/459, bugs #1 and #3 fixed
-- [ ] url / url_search_params
+- [x] url / url_search_params (JS port, 6 handle-based ops, 61 smoke tests)
 - [ ] fetch/* (fetch, Headers, Response, Request)
 - [ ] blob / form_data
 - [ ] streams
