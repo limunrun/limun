@@ -217,6 +217,28 @@ const defaultFiles = [
   // SKIP `streams/readable-streams/from.any.js` — `ReadableStream.from` uses
   //   the async-iterable converter which requires a full `open()`/`return()`
   //   protocol that exercises edge cases beyond the WPT subset we run.
+  // --- Web Messaging (MessageChannel / MessagePort / MessageEvent) ------
+  // Single-realm — the WPT Worker/iframe tests are skipped (need a
+  // browsing context or Worker global this runtime doesn't have).
+  "webmessaging/message-channels/basics.any.js",
+  "webmessaging/message-channels/close.any.js",
+  "webmessaging/message-channels/implied-start.any.js",
+  "webmessaging/message-channels/no-start.any.js",
+  "webmessaging/message-channels/dictionary-transferrable.any.js",
+  // SKIP `webmessaging/message-channels/worker-post-after-close.any.js` —
+  //   needs `new Worker(...)` (Limun is single-realm, no Workers).
+  // SKIP `webmessaging/message-channels/worker.any.js` — needs Workers.
+  "webmessaging/MessagePort_onmessage_start.any.js",
+  "webmessaging/MessageEvent.any.js",
+  "webmessaging/Channel_postMessage_with_transfer_incoming_messages.any.js",
+  "webmessaging/Channel_postMessage_with_transfer_outgoing_messages.any.js",
+  // SKIP `webmessaging/Channel_postMessage_Blob.any.js` — needs
+  //   `FileReader` (not implemented yet) + `/common/gc.js`.
+  "webmessaging/Channel_postMessage_clone_port.any.js",
+  // SKIP
+  //   `html/infrastructure/safe-passing-of-structured-data/messagechannel.any.js`
+  //   — META loads `/common/sab.js` (SharedArrayBuffer) + the structured-
+  //   clone battery-of-tests, neither of which is self-contained here.
 ];
 
 // When --suite=<name> is given, discover .any.js files under suite/<name>/.

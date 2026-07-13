@@ -208,6 +208,58 @@ Deviations from Deno:
 - `assert` is in-module TypeError-thrower; `rethrowAssertionErrorRejection` no-op.
 - `fastPipeTo`/`op_pipe` dropped — `readableStreamPipeTo` pure-JS slow path.
 
+### 3b. MessageChannel/MessagePort/MessageEvent + structured clone ✅ DONE
+
+Implemented `MessageChannel`/`MessagePort`/`MessageEvent` + `structuredClone`
+global. Single-realm (per MISSION.md): transport is JS-side message queues +
+microtask delivery — no tokio channels, no resource table, no
+`op_message_port_*` ops.
+
+Rust ops added (`src/core/ops.rs`, flat `v8::FunctionCallback`):
+- `op_structured_clone(value) -> value` — V8 `ValueSerializer`→`ValueDeserializer`
+  round-trip.
+- `op_serialize(value, hostObjects?, transferredArrayBuffers?, errorCallback?)
+  -> Uint8Array` — full serialize with host-object + ArrayBuffer-transfer support.
+- `op_deserialize(bytes, hostObjects?, transferredArrayBuffers?) -> value` —
+  deserialize. ArrayBuffer transfer via stashed backing stores (thread_local
+  `TRANSFERRED_BUFFERS` — safe: serialize→deserialize is synchronous, same
+  thread).
+- Supporting: `SerializeDeserialize` struct (impls `ValueSerializerImpl`/
+  `ValueDeserializerImpl`), `TransferredBuffer` struct, `host_object_brand_symbol`
+  (`Symbol.for("limun.hostObject")`).
+
+JS modules:
+- `src/web/02_structured_clone.js` (244 lines) — `structuredClone` global;
+  ArrayBuffer/TypedArray/DataView fast paths; TypeError→DOMException
+  DataCloneError wrapping.
+- `src/web/13_message_port.js` (707 lines) — `MessageChannel`/`MessagePort`/
+  `MessageEvent`; single-realm JS-side queue + microtask delivery; port
+  transfer via host-object brand + `partnerPorts` sideband + `_pendingQueue`
+  buffering.
+- `02_event.js` updated: `defineEventHandler` gained optional `onFirstSet`
+  callback (for `onmessage`→`start()`); `globalThis.__bootstrap.event`
+  exposed.
+
+REGISTRY: `02_structured_clone.js` + `13_message_port.js` inserted after
+`02_event.js`, before `05_base64.js`.
+
+WPT: **1888/1892** (was 1859/1868). FileAPI MessagePort test passes ✅. 5
+streams ArrayBuffer-transfer tests now pass ✅ (structuredClone wired into
+streams `cloneChunk`). New messagechannel suites added. Remaining 4
+failures: 3 pre-existing streams microtask/transform edge cases + 1
+multi-hop port-transfer ordering edge case (single-hop transfer works).
+Build clean 0 warnings; all unit/infra tests pass.
+
+Deviations from Deno:
+- No `op_message_port_*` / resource-rid model — JS-side queues.
+- ArrayBuffer transfer via stashed backing stores (Deno uses SAB store).
+- No SAB / Wasm module store (returns `None`).
+- Host-object brand `Symbol.for("limun.hostObject")` (Deno: `hostObject`).
+- `defineEventHandler` extended with optional `onFirstSet`.
+- `MessageEvent` defined in `13_message_port.js` (Deno: `02_event.js`).
+- No `core.registerTransferableResource`/`Transferable`/`*TransferSteps` —
+  brand-symbol mechanism.
+
 ## Notes
 - Build: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo build`
 - WPT: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo run -- tests/wpt/run.js`

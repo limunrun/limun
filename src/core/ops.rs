@@ -25,6 +25,14 @@ use std::io::{IsTerminal, Write};
 
 use crate::core::event_loop;
 
+// Trait imports for V8's structured-clone delegate. `ValueSerializer` /
+// `ValueDeserializer` expose `write_header` / `read_header` /
+// `transfer_array_buffer` / `write_value` / `read_value` through these
+// helper traits (the impls forward to the pinned C++ delegate), so the
+// traits must be in scope to call the methods.
+use v8::ValueDeserializerHelper;
+use v8::ValueSerializerHelper;
+
 /// Install the `__limunOps` namespace on `globalThis` with every registered
 /// op attached. Called once from `core::mod::execute`, before internal JS
 /// modules evaluate (so primordials/infra modules can call ops during
@@ -81,6 +89,26 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     set_fn(scope, ops, "op_url_reparse", op_url_reparse);
     set_fn(scope, ops, "op_url_parse_search_params", op_url_parse_search_params);
     set_fn(scope, ops, "op_url_stringify_search_params", op_url_stringify_search_params);
+
+    // Structured clone / MessagePort — V8 `ValueSerializer`/`ValueDeserializer`
+    // backing ops. The spec surface (`structuredClone` global,
+    // `MessageChannel`/`MessagePort`/`MessageEvent`, transfer-list validation,
+    // JS-side message queues for single-realm delivery) lives in the JS
+    // modules `ext:limun/02_structured_clone.js` and
+    // `ext:limun/13_message_port.js`. These three ops are the irreducible
+    // native work: V8's structured-clone wire format (serialize to bytes,
+    // deserialize back), with host-object brand callbacks (for MessagePort
+    // transfer) and `ArrayBuffer` transfer (detach on serialize, mint fresh
+    // backing stores on deserialize).
+    //
+    // Limun has no `SharedArrayBuffer` and no Wasm module store, so the
+    // `get_shared_array_buffer_id`/`get_wasm_module_transfer_id` delegate
+    // hooks return `None` (V8 then refuses to clone SABs / Wasm modules,
+    // matching `core.structuredClone`'s TypeError → DOMException
+    // "DataCloneError" path in the JS wrapper).
+    set_fn(scope, ops, "op_structured_clone", op_structured_clone);
+    set_fn(scope, ops, "op_serialize", op_serialize);
+    set_fn(scope, ops, "op_deserialize", op_deserialize);
 
     crate::web::set_global(scope, global, "__limunOps", ops.into());
 }
@@ -1228,4 +1256,661 @@ fn op_url_stringify_search_params(
     }
     let out = ser.finish();
     rv.set(v8::String::new(scope, &out).unwrap().into());
+}
+
+// --- Structured clone ops --------------------------------------------------
+//
+// V8 `ValueSerializer`/`ValueDeserializer` backing for `structuredClone` and
+// `MessagePort.postMessage`. Ports Deno's `SerializeDeserialize` struct + the
+// `op_serialize`/`op_deserialize`/`op_structured_clone` ops from
+// `libs/core/ops_builtin_v8.rs`, adapted to Limun's flat-op model:
+//   - No `OpState`, no `op2` macro, no `JsErrorBox` — bare `v8::FunctionCallback`s
+//     that return flat V8 values or throw.
+//   - No `SharedArrayBufferStore` (`get_shared_array_buffer_id` → `None`) —
+//     Limun is single-realm with no SAB.
+//   - No `CompiledWasmModuleStore` (`get_wasm_module_transfer_id` → `None`).
+//   - No `for_storage` flag, no `deserializers` map, no broadcast mode.
+//   - The host-object brand symbol is `Symbol.for("limun.hostObject")` (Deno
+//     uses `Symbol.for("hostObject")` via a static string). The MessagePort
+//     JS class sets this symbol on instances so the serializer recognizes
+//     them as host objects and calls the brand's serialize method.
+//
+// `ArrayBuffer` transfer protocol (matches Deno/V8):
+//   - Serialize: the JS side passes a `transferredArrayBuffers` array of
+//     `ArrayBuffer`s. For each one, we detach the original (V8 transfers
+//     ownership of the backing store), call
+//     `value_serializer.transfer_array_buffer(index, buf)`, and write the
+//     *index* back into the same array slot (the JS side stashes the index
+//     for the deserialize side).
+//   - Deserialize: the JS side passes the same array (now containing
+//     indices). For each one, we mint a fresh `ArrayBuffer` and call
+//     `value_deserializer.transfer_array_buffer(index, new_buf)` *before*
+//     `read_value` — V8 then wires the fresh buffer into the deserialized
+//     graph wherever the index appears. The fresh buffer is written back
+//     into the array slot so the JS side can collect the transferred
+//     buffers and hand them out as transferables.
+
+/// The brand symbol key. `Symbol.for("limun.hostObject")` — JS classes
+/// opt into host-object serialization by setting this symbol on instances
+/// (a per-class serialize method as the value). Deno uses
+/// `Symbol.for("hostObject")`; the different key keeps Limun's host-object
+/// registry disjoint from any future Deno-interop layer.
+const HOST_OBJECT_SYMBOL_KEY: &str = "limun.hostObject";
+
+/// A transferred `ArrayBuffer`'s backing store + byte length, stashed by
+/// `op_serialize` for `op_deserialize` to recover. Single-realm: both
+/// ops run in the same isolate/thread, back-to-back, so the backing store
+/// (a `SharedRef<BackingStore>`) survives across the boundary. V8's
+/// `transfer_array_buffer` on the serializer side writes only the id into
+/// the wire format (not the contents); the deserializer must provide a
+/// fresh `ArrayBuffer` for each id, and we give it one backed by the
+/// *same* backing store — no copy, same memory.
+struct TransferredBuffer {
+    backing_store: v8::SharedRef<v8::BackingStore>,
+    #[allow(dead_code)]
+    byte_length: usize,
+}
+
+thread_local! {
+    /// Stash of transferred `ArrayBuffer` backing stores, keyed by the
+    /// index (slot in the `transferredArrayBuffers` array). Populated by
+    /// `op_serialize` (one entry per transferred ArrayBuffer), consumed
+    /// and cleared by `op_deserialize`. Single-slot per index — safe
+    /// because serialize and deserialize are synchronous and
+    /// non-overlapping in the single-realm model.
+    static TRANSFERRED_BUFFERS: RefCell<HashMap<u32, TransferredBuffer>> =
+        RefCell::new(HashMap::new());
+}
+
+/// `SerializeDeserialize` — the V8 `ValueSerializerImpl` /
+/// `ValueDeserializerImpl` delegate. Holds the per-call state: the
+/// host-object brand symbol, the `host_objects` array (for the
+/// index-by-position fallback when a host object isn't brand-tagged), the
+/// `error_callback` (called on DataCloneError instead of throwing
+/// directly, so the JS side can rewrite the message), and the
+/// `transferred_array_buffers` array (for ArrayBuffer transfer).
+///
+/// Simplified vs Deno: no `for_storage`, no `deserializers`, no SAB store,
+/// no broadcast mode.
+struct SerializeDeserialize<'a> {
+    host_objects: Option<v8::Local<'a, v8::Array>>,
+    error_callback: Option<v8::Local<'a, v8::Function>>,
+    host_object_brand: Option<v8::Local<'a, v8::Symbol>>,
+}
+
+impl v8::ValueSerializerImpl for SerializeDeserialize<'_> {
+    fn throw_data_clone_error<'s, 'i>(
+        &self,
+        scope: &mut v8::PinScope<'s, 'i>,
+        message: v8::Local<'s, v8::String>,
+    ) {
+        if let Some(cb) = self.error_callback {
+            v8::tc_scope!(let tc, scope);
+            let undefined = v8::undefined(tc).into();
+            cb.call(tc, undefined, &[message.into()]);
+            if tc.has_caught() || tc.has_terminated() {
+                tc.rethrow();
+                return;
+            }
+            return;
+        }
+        let error = v8::Exception::type_error(scope, message);
+        scope.throw_exception(error);
+    }
+
+    fn get_shared_array_buffer_id<'s, 'i>(
+        &self,
+        _scope: &mut v8::PinScope<'s, 'i>,
+        _shared_array_buffer: v8::Local<'s, v8::SharedArrayBuffer>,
+    ) -> Option<u32> {
+        // Limun has no SharedArrayBuffer — refuse to clone.
+        None
+    }
+
+    fn get_wasm_module_transfer_id<'s, 'i>(
+        &self,
+        scope: &mut v8::PinScope<'s, 'i>,
+        _module: v8::Local<v8::WasmModuleObject>,
+    ) -> Option<u32> {
+        // Limun has no Wasm module store — refuse to clone. Throw a
+        // DataCloneError via the delegate so the JS side's error callback
+        // can rewrite the message (matches Deno's "Wasm modules cannot be
+        // stored" path, though here it's not just storage mode).
+        let msg = v8::String::new(scope, "Wasm modules cannot be cloned").unwrap();
+        self.throw_data_clone_error(scope, msg);
+        None
+    }
+
+    fn has_custom_host_object(&self, _isolate: &v8::Isolate) -> bool {
+        self.host_object_brand.is_some()
+    }
+
+    fn is_host_object<'s, 'i>(
+        &self,
+        scope: &mut v8::PinScope<'s, 'i>,
+        object: v8::Local<'s, v8::Object>,
+    ) -> Option<bool> {
+        match self.host_object_brand {
+            Some(symbol) => object.has(scope, symbol.into()),
+            _ => Some(false),
+        }
+    }
+
+    fn write_host_object<'s, 'i>(
+        &self,
+        scope: &mut v8::PinScope<'s, 'i>,
+        object: v8::Local<'s, v8::Object>,
+        value_serializer: &dyn v8::ValueSerializerHelper,
+    ) -> Option<bool> {
+        // Brand-tagged path: the host object's brand symbol property is a
+        // function that returns the serialization payload (a v8 value).
+        // Write the sentinel `u32::MAX` so the deserialize side knows to
+        // read a value (the payload) and hand it to the brand's
+        // deserializer. Deno's `read_host_object` then looks up a
+        // `deserializers` map keyed by the payload's `type` field; Limun
+        // instead stashes the payload on the deserialized host object and
+        // lets the JS `MessagePort` class reconstruct from it (see
+        // `13_message_port.js`).
+        if let Some(host_object_brand) = self.host_object_brand {
+            let value = object.get(scope, host_object_brand.into())?;
+            if let Ok(func) = value.try_cast::<v8::Function>() {
+                let result = func.call(scope, object.into(), &[])?;
+                value_serializer.write_uint32(u32::MAX);
+                value_serializer.write_value(scope.get_current_context(), result);
+                return Some(true);
+            }
+        }
+        // Index-by-position fallback: host object isn't brand-tagged but
+        // appears in the `host_objects` array — write its index. The
+        // deserialize side returns the same object from the array (no
+        // copy — this is the "transfer a reference" path used when the
+        // JS side explicitly lists a host object in `hostObjects`).
+        if let Some(host_objects) = self.host_objects {
+            for i in 0..host_objects.length() {
+                let value = host_objects.get_index(scope, i).unwrap();
+                if value.strict_equals(object.into()) {
+                    value_serializer.write_uint32(i);
+                    return Some(true);
+                }
+            }
+        }
+        let message = v8::String::new(scope, "Unsupported object type").unwrap();
+        self.throw_data_clone_error(scope, message);
+        None
+    }
+}
+
+impl v8::ValueDeserializerImpl for SerializeDeserialize<'_> {
+    fn get_shared_array_buffer_from_id<'s, 'i>(
+        &self,
+        _scope: &mut v8::PinScope<'s, 'i>,
+        _transfer_id: u32,
+    ) -> Option<v8::Local<'s, v8::SharedArrayBuffer>> {
+        // Limun has no SharedArrayBuffer.
+        None
+    }
+
+    fn get_wasm_module_from_id<'s, 'i>(
+        &self,
+        _scope: &mut v8::PinScope<'s, 'i>,
+        _clone_id: u32,
+    ) -> Option<v8::Local<'s, v8::WasmModuleObject>> {
+        // Limun has no Wasm module store.
+        None
+    }
+
+    fn read_host_object<'s, 'i>(
+        &self,
+        scope: &mut v8::PinScope<'s, 'i>,
+        value_deserializer: &dyn v8::ValueDeserializerHelper,
+    ) -> Option<v8::Local<'s, v8::Object>> {
+        let mut i = 0u32;
+        if !value_deserializer.read_uint32(&mut i) {
+            return None;
+        }
+        if i == u32::MAX {
+            // Brand-tagged path: a payload value follows. Read it, wrap
+            // it in a `{ data, __limunHostObject: true }` object, and
+            // return that. The JS `MessagePort.deserialize` static method
+            // (registered as the brand symbol's *deserialize* side via a
+            // per-class side table) reconstructs the real instance from
+            // `data`. Limun has no `deserializers` map (Deno's
+            // `core.getCloneableDeserializers`); instead the brand symbol
+            // on the *prototype* carries a `deserialize` static method
+            // the JS side invokes. Here we just hand back the payload
+            // wrapped so the JS side's deserialize wrapper can find it.
+            if let Some(value) =
+                value_deserializer.read_value(scope.get_current_context())
+            {
+                // Stash the payload in a fresh host-object shell. The JS
+                // `MessagePort` post-deserialize pass walks the result
+                // graph for these shells and swaps them for real
+                // `MessagePort` instances built from the payload.
+                let shell = v8::Object::new(scope);
+                let key = v8::String::new(scope, "__limunHostObjectPayload").unwrap();
+                shell.set(scope, key.into(), value);
+                // Brand the shell so the JS side can recognize it.
+                if let Some(brand) = self.host_object_brand {
+                    shell.set(scope, brand.into(), v8::Boolean::new(scope, true).into());
+                }
+                return Some(shell);
+            }
+        } else if let Some(host_objects) = self.host_objects {
+            // Index-by-position path: return the original object from the
+            // array (no copy — a transferred reference).
+            if let Some(value) = host_objects.get_index(scope, i) {
+                if let Ok(obj) = value.try_cast::<v8::Object>() {
+                    return Some(obj);
+                }
+            }
+        }
+
+        let message: v8::Local<v8::String> =
+            v8::String::new(scope, "Failed to deserialize host object").unwrap();
+        let error = v8::Exception::error(scope, message);
+        scope.throw_exception(error);
+        None
+    }
+}
+
+/// Look up (or create) the host-object brand symbol
+/// `Symbol.for("limun.hostObject")`. Cached on a thread_local so we don't
+/// re-`Symbol::for_key` on every serialize call (V8 dedups it anyway, but
+/// the round-trip still costs).
+fn host_object_brand_symbol<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::Symbol> {
+    let key = v8::String::new(scope, HOST_OBJECT_SYMBOL_KEY).unwrap();
+    v8::Symbol::for_key(scope, key)
+}
+
+/// Wrap `bytes` into a fresh `Uint8Array` (V8 owns the backing store —
+/// `new_backing_store_from_vec` moves the `Vec`'s allocation into V8's
+/// heap, so no copy). Used by `op_serialize` (returns the wire-format
+/// bytes) and internally by `op_structured_clone` (passes the bytes to the
+/// deserializer).
+fn vec_to_uint8_array<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    bytes: Vec<u8>,
+) -> v8::Local<'s, v8::Uint8Array> {
+    let len = bytes.len();
+    let store = v8::ArrayBuffer::new_backing_store_from_vec(bytes).make_shared();
+    let ab = v8::ArrayBuffer::with_backing_store(scope, &store);
+    v8::Uint8Array::new(scope, ab, 0, len).unwrap()
+}
+
+/// `op_structured_clone(value) -> value` — serialize `value` to bytes via
+/// V8's `ValueSerializer`, then immediately deserialize back. The
+/// `structuredClone()` global (no transferables) calls this. Host objects
+/// brand-tagged with `Symbol.for("limun.hostObject")` round-trip through
+/// the brand's serialize/deserialize methods (the JS `MessagePort` class
+/// uses this for `structuredClone(port)` — clone, not transfer).
+///
+/// On serialize failure, rethrows the V8 exception (the JS wrapper in
+/// `02_structured_clone.js` catches a TypeError and rethrows as
+/// DOMException "DataCloneError").
+fn op_structured_clone(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let value = args.get(0);
+    let brand = host_object_brand_symbol(scope);
+
+    let sd = Box::new(SerializeDeserialize {
+        host_objects: None,
+        error_callback: None,
+        host_object_brand: Some(brand),
+    });
+    let value_serializer = v8::ValueSerializer::new(scope, sd);
+    value_serializer.write_header();
+
+    v8::tc_scope!(let tc, scope);
+    let ret = value_serializer.write_value(tc.get_current_context(), value);
+    if tc.has_caught() || tc.has_terminated() {
+        tc.rethrow();
+        return;
+    }
+    if !matches!(ret, Some(true)) {
+        let msg = v8::String::new(tc, "Failed to serialize value").unwrap();
+        tc.throw_exception(v8::Exception::type_error(tc, msg));
+        return;
+    }
+    let vector = value_serializer.release();
+
+    let sd = Box::new(SerializeDeserialize {
+        host_objects: None,
+        error_callback: None,
+        host_object_brand: Some(brand),
+    });
+    let value_deserializer = v8::ValueDeserializer::new(tc, sd, &vector);
+    let parsed_header = value_deserializer
+        .read_header(tc.get_current_context())
+        .unwrap_or(false);
+    if !parsed_header {
+        let msg = v8::String::new(tc, "could not deserialize value").unwrap();
+        tc.throw_exception(v8::Exception::range_error(tc, msg));
+        return;
+    }
+    let value = value_deserializer.read_value(tc.get_current_context());
+    match value {
+        Some(deserialized) => {
+            rv.set(deserialized);
+        }
+        None => {
+            if !tc.has_caught() {
+                let msg = v8::String::new(tc, "could not deserialize value").unwrap();
+                tc.throw_exception(v8::Exception::range_error(tc, msg));
+            }
+        }
+    }
+}
+
+/// `op_serialize(value, hostObjects?, transferredArrayBuffers?,
+/// errorCallback?) -> Uint8Array` — serialize `value` to V8's
+/// structured-clone wire format. `hostObjects` is an array of host objects
+/// (for the index-by-position transfer path); `transferredArrayBuffers`
+/// is an array of `ArrayBuffer`s to transfer (detach + write index back);
+/// `errorCallback` is called on DataCloneError with the V8 message (so the
+/// JS side can rewrite it to a DOMException-friendly form).
+fn op_serialize(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let value = args.get(0);
+    let host_objects = if args.length() > 1 && !args.get(1).is_null_or_undefined() {
+        match <v8::Local<v8::Array>>::try_from(args.get(1)) {
+            Ok(arr) => Some(arr),
+            Err(_) => {
+                let msg = v8::String::new(scope, "hostObjects not an array").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let transferred_array_buffers: Option<v8::Local<v8::Array>> =
+        if args.length() > 2 && !args.get(2).is_null_or_undefined() {
+            match <v8::Local<v8::Array>>::try_from(args.get(2)) {
+                Ok(arr) => Some(arr),
+                Err(_) => {
+                    let msg = v8::String::new(
+                        scope,
+                        "transferredArrayBuffers not an array",
+                    )
+                    .unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+    let error_callback = if args.length() > 3 && !args.get(3).is_null_or_undefined() {
+        match <v8::Local<v8::Function>>::try_from(args.get(3)) {
+            Ok(cb) => Some(cb),
+            Err(_) => {
+                let msg = v8::String::new(scope, "error callback not a function").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    let brand = host_object_brand_symbol(scope);
+
+    let sd = Box::new(SerializeDeserialize {
+        host_objects,
+        error_callback,
+        host_object_brand: Some(brand),
+    });
+    let value_serializer = v8::ValueSerializer::new(scope, sd);
+    value_serializer.write_header();
+
+    // ArrayBuffer transfer: register each `ArrayBuffer` in
+    // `transferredArrayBuffers` with V8's serializer (writes the id into
+    // the wire format wherever the buffer appears) and stash its backing
+    // store for the deserialize side. The original buffers are detached
+    // AFTER `write_value` completes (detaching before would make the
+    // buffer's data inaccessible to the serializer, causing a
+    // "DataCloneError: detached" — V8 needs to read the buffer's
+    // contents during `write_value`).
+    let mut buffers_to_detach: Vec<v8::Local<v8::ArrayBuffer>> = Vec::new();
+    if let Some(tabs) = transferred_array_buffers {
+        for index in 0..tabs.length() {
+            let i = v8::Number::new(scope, index as f64).into();
+            let buf_val = tabs.get(scope, i).unwrap();
+            let buf = match <v8::Local<v8::ArrayBuffer>>::try_from(buf_val) {
+                Ok(b) => b,
+                Err(_) => {
+                    let msg = v8::String::new(
+                        scope,
+                        "item in transferredArrayBuffers not an ArrayBuffer",
+                    )
+                    .unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            };
+            if !buf.is_detachable() {
+                let msg = v8::String::new(
+                    scope,
+                    "item in transferredArrayBuffers is not transferable",
+                )
+                .unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+            if buf.was_detached() {
+                let msg = v8::String::new(
+                    scope,
+                    &format!("ArrayBuffer at index {index} is already detached"),
+                )
+                .unwrap();
+                scope.throw_exception(v8::Exception::error(scope, msg));
+                return;
+            }
+            let byte_length = buf.byte_length();
+            // Grab the backing store BEFORE detaching (the backing store
+            // ref we hold here keeps it alive). The deserializer creates
+            // a fresh ArrayBuffer with this backing store — same
+            // contents, same memory, no copy.
+            let backing_store = buf.get_backing_store();
+            // Register the transfer with V8. `transfer_array_buffer`
+            // records the id so V8 writes it (not the contents) into the
+            // wire format wherever this buffer appears. The contents are
+            // carried via the stashed backing store.
+            value_serializer.transfer_array_buffer(index, buf);
+            // Stash the backing store for the deserialize side.
+            TRANSFERRED_BUFFERS.with(|cell| {
+                cell.borrow_mut().insert(
+                    index as u32,
+                    TransferredBuffer {
+                        backing_store,
+                        byte_length,
+                    },
+                );
+            });
+            // Remember to detach after `write_value` (V8 reads the
+            // buffer's contents during serialization).
+            buffers_to_detach.push(buf);
+            // Write the index back so the JS side can pass the array to
+            // `op_deserialize`.
+            let id = v8::Number::new(scope, index as f64).into();
+            tabs.set(scope, i, id);
+        }
+    }
+
+    v8::tc_scope!(let tc, scope);
+    let ret = value_serializer.write_value(tc.get_current_context(), value);
+    if tc.has_caught() || tc.has_terminated() {
+        tc.rethrow();
+        return;
+    }
+    if !matches!(ret, Some(true)) {
+        let msg = v8::String::new(tc, "Failed to serialize value").unwrap();
+        tc.throw_exception(v8::Exception::type_error(tc, msg));
+        return;
+    }
+    // Now that V8 has read the buffers' contents, detach the originals
+    // (the sender gives up ownership — spec: transferred ArrayBuffers
+    // are detached after the clone).
+    for buf in &buffers_to_detach {
+        buf.detach(None);
+    }
+    let vector = value_serializer.release();
+    rv.set(vec_to_uint8_array(tc, vector).into());
+}
+
+/// `op_deserialize(bytes, hostObjects?, transferredArrayBuffers?) -> value`
+/// — deserialize `bytes` (a `Uint8Array` produced by `op_serialize`) back
+/// into a V8 value. `hostObjects` is the same array passed to
+/// `op_serialize` (for the index-by-position path); `transferredArrayBuffers`
+/// is the array of indices written back by `op_serialize` — for each
+/// index, we mint a fresh `ArrayBuffer` and call
+/// `transfer_array_buffer(index, new_buf)` *before* `read_value`, so V8
+/// wires the fresh buffer into the deserialized graph wherever the index
+/// appears. The fresh buffer is written back into the array slot so the
+/// JS side can collect the transferred buffers.
+fn op_deserialize(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    // Read the bytes: accept `Uint8Array` or any `ArrayBufferView` /
+    // `ArrayBuffer` (the JS side always passes a `Uint8Array` from
+    // `op_serialize`, but be tolerant).
+    let bytes: Vec<u8> = match read_bytes(args.get(0)) {
+        Some(b) => b,
+        None => {
+            let msg = v8::String::new(scope, "deserialize: expected Uint8Array").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+    let host_objects = if args.length() > 1 && !args.get(1).is_null_or_undefined() {
+        match <v8::Local<v8::Array>>::try_from(args.get(1)) {
+            Ok(arr) => Some(arr),
+            Err(_) => {
+                let msg = v8::String::new(scope, "hostObjects not an array").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let _transferred_array_buffers: Option<v8::Local<v8::Array>> =
+        if args.length() > 2 && !args.get(2).is_null_or_undefined() {
+            match <v8::Local<v8::Array>>::try_from(args.get(2)) {
+                Ok(arr) => Some(arr),
+                Err(_) => {
+                    let msg = v8::String::new(
+                        scope,
+                        "transferredArrayBuffers not an array",
+                    )
+                    .unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+    let brand = host_object_brand_symbol(scope);
+
+    let sd = Box::new(SerializeDeserialize {
+        host_objects,
+        error_callback: None,
+        host_object_brand: Some(brand),
+    });
+    let value_deserializer = v8::ValueDeserializer::new(scope, sd, &bytes);
+    let parsed_header = value_deserializer
+        .read_header(scope.get_current_context())
+        .unwrap_or(false);
+    if !parsed_header {
+        let msg = v8::String::new(scope, "could not deserialize value").unwrap();
+        scope.throw_exception(v8::Exception::range_error(scope, msg));
+        return;
+    }
+
+    // ArrayBuffer transfer: for each index in `transferredArrayBuffers`,
+    // recover the stashed backing store (from the serialize side) and
+    // mint a fresh `ArrayBuffer` with that backing store. Call
+    // `transfer_array_buffer(index, new_buf)` so V8 wires the fresh
+    // buffer into the deserialized graph wherever the index appears. The
+    // fresh buffer is written back into the array slot (replacing the
+    // index) so the JS side can collect it as a transferable.
+    //
+    // Single-realm: the backing store was stashed in `TRANSFERRED_BUFFERS`
+    // by `op_serialize` (same thread, back-to-back). The stash is cleared
+    // after each deserialize to avoid leaks.
+    if let Some(tabs) = _transferred_array_buffers {
+        for i in 0..tabs.length() {
+            let i_key = v8::Number::new(scope, i as f64).into();
+            let id_val = tabs.get(scope, i_key).unwrap();
+            let id = match id_val.number_value(scope) {
+                Some(id) => id as u32,
+                None => {
+                    let msg = v8::String::new(
+                        scope,
+                        "item in transferredArrayBuffers not a number (index)",
+                    )
+                    .unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            };
+            // Recover the stashed backing store.
+            let transferred = TRANSFERRED_BUFFERS.with(|cell| {
+                cell.borrow_mut().remove(&id)
+            });
+            let Some(TransferredBuffer { backing_store, byte_length: _ }) = transferred
+            else {
+                // No backing store stashed for this index — the serialize
+                // side didn't transfer this buffer (or the stash was
+                // cleared). V8 will fail to deserialize the transferred
+                // ArrayBuffer reference; surface a TypeError.
+                let msg = v8::String::new(
+                    scope,
+                    "transferred ArrayBuffer backing store not found",
+                )
+                .unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            };
+            // Mint a fresh ArrayBuffer with the original's backing store
+            // (same contents, same memory — no copy). Single-realm makes
+            // this safe: both sides run in the same isolate.
+            let new_buf = v8::ArrayBuffer::with_backing_store(scope, &backing_store);
+            value_deserializer.transfer_array_buffer(id, new_buf);
+            // Write the fresh buffer back so the JS side can collect it.
+            tabs.set(scope, i_key, new_buf.into());
+        }
+    }
+
+    let value = value_deserializer.read_value(scope.get_current_context());
+    match value {
+        Some(deserialized) => {
+            rv.set(deserialized);
+        }
+        None => {
+            // `read_value` returned `None` — either V8 threw (in which
+            // case the pending exception is already on the isolate) or
+            // the stream was truncated. Surface a RangeError only if V8
+            // didn't already set an exception (matches Deno's
+            // `JsErrorBox::range_error("could not deserialize value")`).
+            v8::tc_scope!(let tc, scope);
+            if !tc.has_caught() {
+                let msg = v8::String::new(tc, "could not deserialize value").unwrap();
+                tc.throw_exception(v8::Exception::range_error(tc, msg));
+            }
+            tc.rethrow();
+        }
+    }
 }

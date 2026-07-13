@@ -638,7 +638,7 @@
     return wrappedHandler;
   }
 
-  function defineEventHandler(emitter, name) {
+  function defineEventHandler(emitter, name, onFirstSet) {
     ObjectDefineProperty(emitter, `on${name}`, {
       __proto__: null,
       get() {
@@ -670,6 +670,13 @@
           self.addEventListener(name, wrapper);
           entry = { handler: value, wrapper };
           self[_eventHandlers].set(name, entry);
+          // First-set hook: used by `MessagePort` to imply `start()`
+          // when `onmessage` is first set (spec: setting `onmessage`
+          // starts message delivery). Called once, only on the first
+          // non-null set.
+          if (typeof onFirstSet === "function") {
+            onFirstSet(self);
+          }
         }
         // If `value === null` and no existing entry, nothing to do (the
         // getter already returns `null`).
@@ -1062,5 +1069,19 @@
     add,
     remove,
     newSignal: () => new AbortSignal(illegalConstructorKey),
+  };
+
+  // Expose the internal event surface `13_message_port.js` needs:
+  //   - `defineEventHandler(emitter, name, onFirstSet?)` — install an
+  //     `on<name>` handler attribute on `emitter` (usually a prototype).
+  //     The optional third arg is called the first time a handler is
+  //     set (used by `MessagePort` to imply `start()` on `onmessage`).
+  //   - `setIsTrusted(event, bool)` — mark an internally-dispatched
+  //     event as trusted (MessagePort messages are trusted per spec).
+  // Not part of the public web API — only consumed by
+  // `13_message_port.js`.
+  globalThis.__bootstrap.event = {
+    defineEventHandler,
+    setIsTrusted,
   };
 })(globalThis);
