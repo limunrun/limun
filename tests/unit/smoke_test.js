@@ -634,15 +634,9 @@ console.group("performance (W3C High Resolution Time L3)");
 // ---------------------------------------------------------------------
 {
   check("typeof performance", typeof performance === "object");
-  // `performance` is a plain object with EventTarget *stubs* (documented
-  // deviation — `15_performance.js` builds it as `ObjectCreate(null)` with
-  // no-op `addEventListener`/`removeEventListener`/`dispatchEvent` because
-  // there's no Rust op to mint an EventTarget instance from JS yet). When
-  // `EventTarget` migrates to JS (or an `op_create_event_target` lands),
-  // `performance` can be made a real EventTarget — until then this stays
-  // a stub. `performance instanceof EventTarget` is `false`.
-  check("performance is NOT instanceof EventTarget (documented stub deviation)",
-    !(performance instanceof EventTarget));
+  // `performance` is a real EventTarget instance (Performance : EventTarget).
+  check("performance is instanceof EventTarget",
+    performance instanceof EventTarget);
   check("performance.now() is a number", typeof performance.now() === "number");
   const t1 = performance.now();
   const t2 = performance.now();

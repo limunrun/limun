@@ -126,6 +126,7 @@ globalThis.done = () => {};
 // Worker). Expand as implementations converge on spec correctness.
 const defaultFiles = [
   "hr-time/monotonic-clock.any.js",
+  "hr-time/basic.any.js",
   "encoding/api-basics.any.js",
   "encoding/textdecoder-fatal.any.js",
   "dom/abort/resources/abort-signal-any-tests.js",

@@ -286,6 +286,23 @@ dropped); URL inspected as regular object.
 WPT: **1911/1915** (+23 console tests, all green). Build clean 0 warnings;
 all unit/infra tests pass.
 
+### 3d. Performance — real EventTarget ✅ DONE
+
+Replaced the no-op EventTarget stubs in `src/web/15_performance.js` (122 lines)
+with a `class Performance extends EventTarget`. `addEventListener`/
+`removeEventListener`/`dispatchEvent` now work (inherit from `02_event.js`'s
+`EventTarget`). `now()`/`timeOrigin`/`toJSON()` preserved. Private constructor
+(`illegalConstructorKey` guard). Smoke test updated (`performance instanceof
+EventTarget` now true).
+
+WPT: `hr-time/basic.any.js` added to `defaultFiles` — "Performance interface
+extends EventTarget" test passes. **1916/1920**. Build clean 0 warnings; all
+unit/infra tests pass.
+
+Deviations: no Performance Timeline API (mark/measure/observer — out of scope);
+`EventTarget` via `globalThis.EventTarget` (installed before `15_performance.js`
+in REGISTRY order).
+
 ## Notes
 - Build: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo build`
 - WPT: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo run -- tests/wpt/run.js`
