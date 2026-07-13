@@ -303,6 +303,41 @@ Deviations: no Performance Timeline API (mark/measure/observer — out of scope)
 `EventTarget` via `globalThis.EventTarget` (installed before `15_performance.js`
 in REGISTRY order).
 
+### 3e. Headers — guard / forbidden-header enforcement ✅ DONE
+
+`src/web/20_headers.js` (681 lines, was 360): full guard model
+(`immutable`/`request`/`request-no-cors`/`response`/`none`) with spec-correct
+enforcement. Forbidden request header names (standard list + `Proxy-`/`Sec-`
+prefixes). `request-no-cors` safelisted header validation. `response` guard
+silently drops `Set-Cookie`/`Set-Cookie2`. `immutable` throws on mutation.
+HTTP token/value validation. Header value normalization (`httpTrim`). Live
+iterator via `webidl.mixinPairIterable`. `HeadersInit` WebIDL converter.
+Internal `createHeaders(pairs, guard)` factory.
+
+`21_request.js`: added `mode` support (`cors`/`no-cors`/`same-origin`/`navigate`),
+passes `request`/`request-no-cors` guard to Headers.
+`22_response.js`: passes `response` guard to Headers (constructor/json/redirect),
+`immutable` for `error()`. `23_fetch.js`: passes `response` guard to
+`buildResponseFromFlat`.
+
+WPT: 12 headers suites added. **2156/2160** (was 1916/1920). Build clean 0
+warnings; all unit/infra tests pass.
+
+### 3f. Body — close Fetch spec gaps ✅ DONE
+
+`src/web/19_body.js` (636 lines, was 360): all BodyInit types supported
+(`Blob`/`File`, `BufferSource`, `FormData`, `URLSearchParams`, `ReadableStream`,
+`USVString`, `null`). Body state with `source` field (`"buffered"`/`"stream"`).
+Streaming body support: `ReadableStream` body init kept as-is; consuming methods
+drain via async read loop. `cloneBodyState` with `ReadableStream.tee()` for
+streaming bodies. FormData → multipart/form-data serialization. URLSearchParams
+→ application/x-www-form-urlencoded. Blob/File → direct byte read via `_bytes`
+symbol.
+
+WPT: 3 body suites added (`fetch/api/body/formdata.any.js`,
+`mime-type.any.js`, `textstream.any.js`). **2156/2160** (shared with 3e).
+Build clean 0 warnings; all unit/infra tests pass.
+
 ## Notes
 - Build: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo build`
 - WPT: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo run -- tests/wpt/run.js`

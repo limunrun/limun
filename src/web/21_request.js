@@ -8,31 +8,8 @@
 // decoding — live in `19_body.js`); this module is pure JS glue over
 // `Headers` (`20_headers.js`) and the shared body mixin.
 //
-// Simplifications vs. spec (matches the previous Rust impl): the body
-// is buffered rather than streamed, so `.body` is a one-chunk
-// `ReadableStream` over the bytes (see `19_body.js`).
-// `mode`/`credentials`/`cache`/`redirect`/`referrer`/`referrerPolicy`/
-// `integrity`/`duplex`/`keepalive` are omitted (the underlying HTTP
-// client handles them implicitly or they have no observable effect
-// here). `signal` is stored as the raw `AbortSignal` object (or
-// `undefined`) — `fetch()` reads it back and threads it through its own
-// abort wiring.
-//
-// Deviation from the previous Rust behavior (a bug fix made during the
-// migration, not a regression): the old Rust constructor unconditionally
-// cleared any signal inherited from an `input` `Request` whenever an
-// `init` object was passed at all — even one with no `signal` key —
-// because `v8::Object::get` always returns `Some(undefined)` for an
-// absent property, and the code treated "returned a nullish value" the
-// same as "explicitly set to null/undefined". Here, `init.signal` is
-// only consulted when the key is actually present
-// (`init.signal !== undefined`); an `init` without a `signal` key
-// leaves an inherited signal alone. Same fix applied to `fetch()`
-// (`23_fetch.js`), which had the identical quirk.
-//
-// Ports Deno's `ext/fetch/23_request.js`, simplified (no streaming body,
-// no CORS mode/credentials, no `mode` field) to match the previous Rust
-// surface:
+// Ports Deno's `ext/fetch/23_request.js`, simplified (no CORS mode/
+// credentials, no `mode` field) to match the previous Rust surface:
 //   - `webidl.brand`/`assertBranded`  → `globalThis.__bootstrap.webidl`
 //     (shared `ext:limun/00_webidl.js`). The body-mixin callback uses a
 //     2-arg adapter that wraps `webidl.assertBranded` with
@@ -40,6 +17,12 @@
 //   - `webidl.converters.*`           → inline/`String()` coercion.
 //   - Body mixin                      → `19_body.js`'s `mixinBody`.
 //   - `[SymbolFor("Deno.privateCustomInspect")]` → dropped.
+//
+// Body sources: `Request` now supports the full BodyInit union
+// (string, BufferSource, Blob, File, FormData, URLSearchParams,
+// ReadableStream). The body's implied `content-type` (if any) is set
+// on the instance's `Headers` unless the caller already supplied one
+// (per the Fetch Standard Request constructor).
 
 ((globalThis) => {
   const { primordials } = globalThis.__bootstrap;
@@ -48,16 +31,23 @@
     ObjectCreate,
     ObjectDefineProperty,
     ObjectPrototypeIsPrototypeOf,
+    SafeSet,
     Symbol,
     SymbolToStringTag,
     TypeError,
     Uint8Array,
   } = primordials;
 
-  const { createHeaders, getHeaderList, cloneHeaderPairs, parseHeadersInit } =
-    globalThis.__bootstrap.headers;
-  const { coerceBodyInit, createBodyState, cloneBodyState, mixinBody } =
-    globalThis.__bootstrap.body;
+  const { createHeaders, getHeaderList, cloneHeaderPairs, parseHeadersInit,
+    guardFromHeaders,
+  } = globalThis.__bootstrap.headers;
+  const {
+    coerceBodyInit,
+    createBodyState,
+    cloneBodyState,
+    drainStream,
+    mixinBody,
+  } = globalThis.__bootstrap.body;
 
   // --- Private fields ------------------------------------------------------
 
@@ -66,6 +56,25 @@
   const _headers = Symbol("headers");
   const _bodyState = Symbol("body state");
   const _signal = Symbol("signal");
+  const _mode = Symbol("mode");
+
+  const REQUEST_MODE = new SafeSet([
+    "cors",
+    "no-cors",
+    "same-origin",
+    "navigate",
+  ]);
+
+  function convertRequestMode(V, prefix, context) {
+    const S = String(V);
+    if (!REQUEST_MODE.has(S)) {
+      throw new TypeError(
+        `${prefix ? prefix + ": " : ""}${context ? context + " " : ""}` +
+          `Value '${S}' is not a valid RequestMode value`,
+      );
+    }
+    return S;
+  }
 
   // --- Request class -------------------------------------------------------
 
@@ -81,8 +90,11 @@
       let method = "GET";
       let url = "";
       let headerPairs = [];
-      let bodyBytes = null;
+      let bodyState = createBodyState(null);
+      let bodyContentType = null;
       let signal;
+      let mode = "cors";
+      let inputIsRequest = false;
 
       // `input` is a `Request` OR a string. If `Request`, clone its
       // fields (the base); `init` (if present) overrides them.
@@ -90,17 +102,15 @@
         typeof input === "object" && input !== null &&
         ObjectPrototypeIsPrototypeOf(RequestPrototype, input)
       ) {
+        inputIsRequest = true;
         method = input[_method];
         url = input[_url];
+        mode = input[_mode];
         headerPairs = cloneHeaderPairs(getHeaderList(input[_headers]));
-        // Body is cloned (spec: clone transfers the body; we have no
-        // stream, so a byte-clone is the equivalent). If the source's
-        // body was already consumed, this silently yields a bodyless
-        // request — matches the previous Rust behavior exactly (it
-        // clones whatever's left in the `Option<Vec<u8>>`, and a
-        // consumed body is `None`).
-        const srcBody = input[_bodyState];
-        bodyBytes = srcBody.bytes !== null ? new Uint8Array(srcBody.bytes) : null;
+        // Spec: clone the input's body. `cloneBodyState` throws if the
+        // body is disturbed or locked; for a streaming body it tees the
+        // stream.
+        bodyState = cloneBodyState(input[_bodyState]);
         signal = input[_signal];
       }
       if (url === "") {
@@ -116,7 +126,17 @@
           headerPairs = parseHeadersInit(init.headers);
         }
         if (init.body !== undefined && init.body !== null) {
-          bodyBytes = coerceBodyInit(init.body);
+          const coerced = coerceBodyInit(init.body);
+          bodyState = createBodyState(coerced);
+          bodyContentType = coerced.contentType;
+        }
+        if (init.mode !== undefined) {
+          mode = convertRequestMode(init.mode, prefix, "mode");
+          if (mode === "navigate") {
+            throw new TypeError(
+              `${prefix}: mode cannot be "navigate"`,
+            );
+          }
         }
         // See the file header comment: only touch `signal` when the
         // key is actually present (fixes a quirk in the previous Rust
@@ -137,7 +157,7 @@
       }
       // Spec: "If init.body is non-null and request's method is GET or
       // HEAD, throw a TypeError."
-      if (bodyBytes !== null && (method === "GET" || method === "HEAD")) {
+      if (bodyState.hasBody && (method === "GET" || method === "HEAD")) {
         throw new TypeError(
           `${prefix}: Request with GET/HEAD method cannot have body`,
         );
@@ -146,8 +166,16 @@
       this[webidl.brand] = webidl.brand;
       this[_method] = method;
       this[_url] = url;
-      this[_headers] = createHeaders(headerPairs);
-      this[_bodyState] = createBodyState(bodyBytes);
+      this[_mode] = mode;
+      const guard = mode === "no-cors" ? "request-no-cors" : "request";
+      this[_headers] = createHeaders(headerPairs, guard);
+      // If the body init implies a content-type and the caller did not
+      // already supply one, append it (per Fetch Standard Request
+      // constructor).
+      if (bodyContentType !== null && !this[_headers].has("content-type")) {
+        this[_headers].append("content-type", bodyContentType);
+      }
+      this[_bodyState] = bodyState;
       this[_signal] = signal;
     }
 
@@ -166,6 +194,11 @@
       return this[_headers];
     }
 
+    get mode() {
+      webidl.assertBranded(this, RequestPrototype, "Request");
+      return this[_mode];
+    }
+
     get signal() {
       webidl.assertBranded(this, RequestPrototype, "Request");
       return this[_signal];
@@ -178,12 +211,14 @@
       const clonedBody = cloneBodyState(this[_bodyState]);
       const clonedHeaders = createHeaders(
         cloneHeaderPairs(getHeaderList(this[_headers])),
+        guardFromHeaders(this[_headers]),
       );
       return newRequestInstance(
         this[_method],
         this[_url],
         clonedHeaders,
         clonedBody,
+        this[_mode],
         this[_signal],
       );
     }
@@ -216,12 +251,13 @@
   /** Build a `Request` instance directly from already-validated parts,
    * bypassing the public constructor's URL/GET-HEAD validation (used
    * by `clone()`). */
-  function newRequestInstance(method, url, headers, bodyState, signal) {
+  function newRequestInstance(method, url, headers, bodyState, mode, signal) {
     const r = ObjectCreate(RequestPrototype);
     r[webidl.brand] = webidl.brand;
     r[_method] = method;
     r[_url] = url;
     r[_headers] = headers;
+    r[_mode] = mode;
     r[_bodyState] = bodyState;
     r[_signal] = signal;
     return r;
@@ -241,14 +277,18 @@
 
   globalThis.__bootstrap.request = {
     isRequest: (v) => ObjectPrototypeIsPrototypeOf(RequestPrototype, v),
-    /** Non-destructive peek at a `Request`'s raw buffered body bytes
-     * (a copy) — `null` if it never had one, or its body was already
-     * consumed. Used by `fetch()` to read the body of a `Request`
-     * `input` without marking it as used (matches the previous Rust
-     * `fetch()`, which cloned the state rather than consuming it). */
-    peekBodyBytes: (request) => {
+    /** Peek at a `Request`'s body bytes without marking a buffered
+     * body as used. For a streaming body, the stream is drained (and
+     * the body becomes used). Returns a `Uint8Array` (possibly empty)
+     * or `null` if the Request has no body. */
+    peekBodyBytes: async (request) => {
       const state = request[_bodyState];
-      return state.bytes !== null ? new Uint8Array(state.bytes) : null;
+      if (!state.hasBody) return new Uint8Array(0);
+      if (state.source === "stream") {
+        state.consumed = true;
+        return drainStream(state.stream);
+      }
+      return state.bytes !== null ? new Uint8Array(state.bytes) : new Uint8Array(0);
     },
   };
 })(globalThis);

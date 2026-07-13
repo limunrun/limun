@@ -117,6 +117,46 @@ globalThis.fetch_json = async (resource) => {
   }
 };
 
+// Shim `fetch` for local `file://` URLs: resolve relative URLs against
+// `currentScriptUrl` (matching a browser's document-base resolution), and
+// for `file://` URLs pointing at JSON resources, use the module loader
+// (import attribute `type:"json"`) instead of the real `fetch()`, which
+// doesn't support `file://`. Non-JSON `file://` URLs and absolute `http(s)`
+// URLs go through the real `fetch()`.
+const realFetch = globalThis.fetch;
+globalThis.fetch = async function (input, init) {
+  if (typeof input === "string") {
+    try {
+      const resolved = new URL(input, currentScriptUrl);
+      if (resolved.protocol === "file:") {
+        if (resolved.pathname.endsWith(".json")) {
+          try {
+            const mod = await import(resolved.href, { with: { type: "json" } });
+            return {
+              ok: true,
+              status: 200,
+              statusText: "",
+              headers: new Headers(),
+              json: () => Promise.resolve(mod.default),
+              text: () => Promise.resolve(JSON.stringify(mod.default)),
+              body: null,
+              type: "basic",
+              url: resolved.href,
+              redirected: false,
+            };
+          } catch {
+            // Fall through to real fetch
+          }
+        }
+      }
+      input = resolved.href;
+    } catch {
+      // Leave non-relative inputs as-is and let the real fetch handle them.
+    }
+  }
+  return realFetch(input, init);
+};
+
 setup({ explicit_done: true });
 const realDone = done;
 globalThis.done = () => {};
@@ -249,6 +289,31 @@ const defaultFiles = [
   "console/console-log-symbol.any.js",
   "console/console-namespace-object-class-string.any.js",
   "console/console-tests-historical.any.js",
+  // --- Fetch Standard (Body) --------------------------------------------
+  "fetch/api/body/formdata.any.js",
+  "fetch/api/body/mime-type.any.js",
+  "fetch/api/body/textstream.any.js",
+  // --- Fetch Standard (Headers) -----------------------------------------
+  // Keep `headers-no-cors.any.js` last: it uses `fetch()` for a WPT
+  // fixture, and `currentScriptUrl` points at the last loaded file when
+  // the async harness starts running.
+  // SKIP `headers-record.any.js` — its `setup()` callback populates a
+  //   Proxy logging handler, but our shared-harness multi-file runner
+  //   has already advanced past the SETUP phase by the time this file
+  //   loads, so `setup(func)` is a no-op.  This test requires per-file
+  //   harness isolation to work correctly.
+  // SKIP `header-values.any.js` / `header-values-normalize.any.js` — both
+  //   use `self.GLOBAL.isWorker()` (not available) and `XMLHttpRequest`
+  //   (not implemented), and fetch from a WPT server fixture.
+  "fetch/api/headers/headers-basic.any.js",
+  "fetch/api/headers/headers-errors.any.js",
+  "fetch/api/headers/headers-forbidden-override.any.js",
+  "fetch/api/headers/headers-normalize.any.js",
+  "fetch/api/headers/headers-casing.any.js",
+  "fetch/api/headers/headers-combine.any.js",
+  "fetch/api/headers/headers-structure.any.js",
+  "fetch/api/headers/header-setcookie.any.js",
+  "fetch/api/headers/headers-no-cors.any.js",
 ];
 
 // When --suite=<name> is given, discover .any.js files under suite/<name>/.

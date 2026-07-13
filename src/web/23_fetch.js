@@ -46,7 +46,8 @@
   const { op_fetch } = globalThis.__limunOps;
   const { getHeaderList, createHeaders, cloneHeaderPairs, parseHeadersInit } =
     globalThis.__bootstrap.headers;
-  const { coerceBodyInit, createBodyState } = globalThis.__bootstrap.body;
+  const { coerceBodyInit, createBodyState, drainStream } =
+    globalThis.__bootstrap.body;
   const { isRequest, peekBodyBytes } = globalThis.__bootstrap.request;
   const { newResponseInstance } = globalThis.__bootstrap.response;
 
@@ -54,7 +55,7 @@
     return newResponseInstance(
       flat.status,
       flat.statusText,
-      createHeaders(flat.headers),
+      createHeaders(flat.headers, "response"),
       createBodyState(flat.body),
       flat.url,
       flat.redirected,
@@ -66,12 +67,9 @@
     const argCount = arguments.length;
     const init = argCount > 1 ? arguments[1] : undefined;
 
-    return new Promise((resolvePromise, rejectPromise) => {
+    return (async () => {
       if (argCount === 0) {
-        rejectPromise(
-          new TypeError("fetch: 1 argument required, but only 0 present"),
-        );
-        return;
+        throw new TypeError("fetch: 1 argument required, but only 0 present");
       }
 
       // Resolve `input`: a `Request` instance (clone its fields as the
@@ -88,7 +86,7 @@
         method = input.method;
         url = input.url;
         headerPairs = cloneHeaderPairs(getHeaderList(input.headers));
-        bodyBytes = peekBodyBytes(input);
+        bodyBytes = await peekBodyBytes(input);
         signal = input.signal;
       }
       if (url === "") {
@@ -99,15 +97,11 @@
       try {
         normalizedUrl = new URL(url).href;
       } catch (e) {
-        rejectPromise(
-          new TypeError(`fetch: invalid URL "${url}": ${e.message}`),
-        );
-        return;
+        throw new TypeError(`fetch: invalid URL "${url}": ${e.message}`);
       }
 
       // `init` overrides (and may supply a `signal`, which wins over
-      // any `Request`-inherited signal per spec — see the file header
-      // comment for the bug fix vs. the previous Rust behavior).
+      // any `Request`-inherited signal per spec).
       if (init !== undefined && init !== null) {
         if (init.method !== undefined) {
           method = String(init.method).toUpperCase();
@@ -116,7 +110,26 @@
           headerPairs = parseHeadersInit(init.headers);
         }
         if (init.body !== undefined && init.body !== null) {
-          bodyBytes = coerceBodyInit(init.body);
+          const coerced = coerceBodyInit(init.body);
+          if (coerced.stream !== null) {
+            bodyBytes = await drainStream(coerced.stream);
+          } else {
+            bodyBytes = coerced.bytes;
+          }
+          // Set the body-implied content-type unless the caller already
+          // supplied one.
+          if (coerced.contentType !== null) {
+            let hasContentType = false;
+            for (let i = 0; i < headerPairs.length; ++i) {
+              if (headerPairs[i][0].toLowerCase() === "content-type") {
+                hasContentType = true;
+                break;
+              }
+            }
+            if (!hasContentType) {
+              headerPairs.push(["content-type", coerced.contentType]);
+            }
+          }
         }
         if (init.signal !== undefined) {
           signal = init.signal === null ? undefined : init.signal;
@@ -126,18 +139,21 @@
       // `AbortSignal`: pre-aborted → reject inline with the signal's
       // reason, no op call.
       if (signal !== undefined && signal.aborted) {
-        rejectPromise(signal.reason);
-        return;
+        throw signal.reason;
       }
 
       // Permission check, task spawn, and abort-listener wiring all
       // happen inside `op_fetch` (Rust) — it returns a Promise that
       // settles asynchronously via the event loop's bridge channel.
-      op_fetch(method, normalizedUrl, headerPairs, bodyBytes, signal).then(
-        (flat) => resolvePromise(buildResponseFromFlat(flat)),
-        (err) => rejectPromise(err),
+      const flat = await op_fetch(
+        method,
+        normalizedUrl,
+        headerPairs,
+        bodyBytes,
+        signal,
       );
-    });
+      return buildResponseFromFlat(flat);
+    })();
   }
 
   // `fetch` is an ordinary operation (Web IDL §3.7.3 default:

@@ -45,8 +45,9 @@
     RangeError,
   } = primordials;
 
-  const { createHeaders, getHeaderList, cloneHeaderPairs, parseHeadersInit } =
-    globalThis.__bootstrap.headers;
+  const { createHeaders, getHeaderList, cloneHeaderPairs, parseHeadersInit,
+    guardFromHeaders,
+  } = globalThis.__bootstrap.headers;
   const { coerceBodyInit, createBodyState, cloneBodyState, mixinBody } =
     globalThis.__bootstrap.body;
 
@@ -68,7 +69,14 @@
     constructor(body = null, init = undefined) {
       const prefix = "Failed to construct 'Response'";
       const hasBody = body !== undefined && body !== null;
-      const bodyBytes = hasBody ? coerceBodyInit(body) : null;
+      let bodyState = createBodyState(null);
+      let bodyContentType = null;
+
+      if (hasBody) {
+        const coerced = coerceBodyInit(body);
+        bodyState = createBodyState(coerced);
+        bodyContentType = coerced.contentType;
+      }
 
       let status = 200;
       let statusText = "";
@@ -105,8 +113,14 @@
       this[webidl.brand] = webidl.brand;
       this[_status] = status;
       this[_statusText] = statusText;
-      this[_headers] = createHeaders(headerPairs);
-      this[_bodyState] = createBodyState(bodyBytes);
+      this[_headers] = createHeaders(headerPairs, "response");
+      // If the body init implies a content-type and the caller did not
+      // already supply one, append it (per Fetch Standard Response
+      // constructor).
+      if (bodyContentType !== null && !this[_headers].has("content-type")) {
+        this[_headers].append("content-type", bodyContentType);
+      }
+      this[_bodyState] = bodyState;
       this[_url] = "";
       this[_redirected] = false;
       this[_type] = "basic";
@@ -156,6 +170,7 @@
       const clonedBody = cloneBodyState(this[_bodyState]);
       const clonedHeaders = createHeaders(
         cloneHeaderPairs(getHeaderList(this[_headers])),
+        guardFromHeaders(this[_headers]),
       );
       return newResponseInstance(
         this[_status],
@@ -209,7 +224,7 @@
       return newResponseInstance(
         status,
         statusText,
-        createHeaders(headerPairs),
+        createHeaders(headerPairs, "response"),
         createBodyState(bodyBytes),
         "",
         false,
@@ -219,13 +234,12 @@
 
     /** `Response.error()` — a network-error response: status 0, empty
      * body, `type === "error"`. Per spec its headers list is empty and
-     * immutable; immutability isn't enforced (no header guards — see
-     * `20_headers.js`), an observable-only-on-mutation simplification. */
+     * immutable. */
     static error() {
       return newResponseInstance(
         0,
         "",
-        createHeaders([]),
+        createHeaders([], "immutable"),
         createBodyState(null),
         "",
         false,
@@ -259,7 +273,7 @@
       return newResponseInstance(
         status,
         reasonPhrase(status),
-        createHeaders([["location", location]]),
+        createHeaders([["location", location]], "response"),
         createBodyState(null),
         "",
         false,

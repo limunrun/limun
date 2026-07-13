@@ -3,42 +3,20 @@
 // `Headers` — WHATWG Fetch Standard
 // (https://fetch.spec.whatwg.org/#headers-class).
 //
-// Migrated from Rust (`web::fetch::headers.rs`, 334 lines) to JS-on-ops.
-// No op needed at all — every operation here is pure JS (array
-// filter/push/splice), which is why this module doesn't touch
-// `__limunOps`.
+// Migrated from Rust (`web::fetch::headers.rs`) to JS-on-ops. Full guard
+// enforcement and HTTP-token/value validation per spec, ported from Deno's
+// `ext/fetch/20_headers.js` with the Limun bootstrap/primordials wiring.
 //
-// Simplified vs. spec (matches the previous Rust impl exactly — see
-// `TODO.md`'s "No header-guard / forbidden-header enforcement" note,
-// an intentional decision, not an oversight): names are lowercased on
-// the way in and there's no HTTP-token/value validation, no guard
-// enforcement (`immutable`/`request`/`response` guards aren't tracked
-// at all — a CLI runtime has no privilege boundary to protect), no
-// `ByteString` WebIDL conversion (plain `String()` coercion instead).
-// Duplicate names are kept in the backing list (`append`) and combined
-// on the way out: `get(name)` joins every matching value with `", "`,
-// and iteration yields one entry per name sorted lexicographically —
-// except `set-cookie`, which is never combined (`getSetCookie()` is the
-// dedicated escape hatch).
-//
-// Ports Deno's `ext/fetch/20_headers.js`, simplified to match the
-// existing Rust behavior rather than full spec strictness:
-//   - `__bootstrap` / `core.ops`   → not used (pure JS, no op).
-//   - `webidl.brand` /
-//     `webidl.assertBranded` /
-//     `webidl.requiredArguments` → `globalThis.__bootstrap.webidl`
-//     (shared `ext:limun/00_webidl.js`).
-//   - `webidl.converters.*`        → dropped; plain `String()` coercion.
-//   - `webidl.mixinPairIterable`   → inline iterator wiring, `10_form_data.js`-style
-//     (a snapshot array's own `[Symbol.iterator]()` — correct `{value,
-//     done}` shape for free).
-//   - guard (`_guard`, `_headerListGetter`/`_headerGet`/`_headerTarget`
-//     lazy-header-list machinery) → dropped (no guard enforcement, no
-//     lazy target — the backing list is always a plain owned array).
-//   - `checkHeaderNameForHttpTokenCodePoint` / `checkForInvalidValueChars`
-//     → dropped (matches the previous Rust: no validation at all).
-//   - `[SymbolFor("Deno.privateCustomInspect")]` → dropped (no
-//     Deno-style custom inspect in Limun yet).
+// Rewired vs. Deno:
+//   - `__bootstrap` / `core`              → `globalThis.__bootstrap`.
+//   - `webidl` / `primordials`            → `globalThis.__bootstrap.webidl` /
+//                                          `globalThis.__bootstrap.primordials`.
+//   - `core.loadExtScript("ext:deno_web/00_infra.js")` helpers → inlined
+//     below (`httpTrim`, token regex, safelisted-header checks).
+//   - `HeadersInit` converter               → added to shared webidl module
+//     (`src/web/00_webidl.js`) so the constructor uses the same overload
+//     resolution as Deno/Node/browsers.
+//   - `[SymbolFor("Deno.privateCustomInspect")]` → dropped.
 
 ((globalThis) => {
   const { primordials } = globalThis.__bootstrap;
@@ -46,13 +24,20 @@
   const {
     ArrayIsArray,
     ArrayPrototypeIncludes,
+    ArrayPrototypeJoin,
     ArrayPrototypePush,
     ArrayPrototypeSort,
     ArrayPrototypeSplice,
     FunctionPrototypeCall,
     ObjectHasOwn,
     ObjectPrototypeIsPrototypeOf,
+    RegExpPrototypeTest,
+    SafeRegExp,
+    String,
+    StringPrototypeCharCodeAt,
+    StringPrototypeMatch,
     StringPrototypeToLowerCase,
+    StringPrototypeTrim,
     Symbol,
     SymbolIterator,
     SymbolToStringTag,
@@ -62,54 +47,399 @@
 
   // --- Private fields ------------------------------------------------------
 
-  // `[string, string][]`, name already lowercased. `append` always
-  // pushes a new entry (values are never combined at storage time);
-  // `get`/iteration combine on read (see `sortedAndCombined`).
   const _list = Symbol("header list");
+  const _guard = Symbol("guard");
+  const _iterableHeaders = Symbol("iterable headers");
+  const _iterableHeadersCache = Symbol("iterable headers cache");
+
+  // --- Infra helpers (ported from ext:deno_web/00_infra.js) ----------------
+
+  const HTTP_TOKEN_CODE_POINT_RE = new SafeRegExp(
+    "^[\\u0021\\u0023-\\u0025\\u0026\\u0027\\u002a\\u002b\\u002d-\\u002e\\u005e-\\u0060\\u007c\\u007e0-9A-Za-z]+$",
+  );
+  const HTTP_BETWEEN_WHITESPACE_RE = new SafeRegExp(
+    "^[\\t\\n\\r ]*(.*?)[\\t\\n\\r ]*$",
+    "s",
+  );
+
+  function httpTrim(s) {
+    const m = StringPrototypeMatch(s, HTTP_BETWEEN_WHITESPACE_RE);
+    return m ? m[1] : "";
+  }
+
+  function normalizeHeaderValue(value) {
+    return httpTrim(value);
+  }
+
+  function checkHeaderNameForHttpTokenCodePoint(name) {
+    return RegExpPrototypeTest(HTTP_TOKEN_CODE_POINT_RE, name);
+  }
+
+  function checkForInvalidValueChars(value) {
+    for (let i = 0; i < value.length; i++) {
+      const c = StringPrototypeCharCodeAt(value, i);
+      if (c === 0x0a || c === 0x0d || c === 0x00) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // --- Forbidden / no-cors header helpers ----------------------------------
+
+  const FORBIDDEN_REQUEST_NAMES = [
+    "accept-charset",
+    "accept-encoding",
+    "access-control-request-headers",
+    "access-control-request-method",
+    "connection",
+    "content-length",
+    "cookie",
+    "cookie2",
+    "date",
+    "dnt",
+    "expect",
+    "host",
+    "keep-alive",
+    "origin",
+    "referer",
+    "set-cookie",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "via",
+  ];
+
+  const FORBIDDEN_METHOD_NAMES = [
+    "x-http-method",
+    "x-http-method-override",
+    "x-method-override",
+  ];
+
+  function isForbiddenMethod(method) {
+    const lower = StringPrototypeToLowerCase(StringPrototypeTrim(method));
+    return lower === "connect" || lower === "trace" || lower === "track";
+  }
+
+  function getDecodeSplitHeader(value) {
+    const values = [];
+    let temporaryValue = "";
+    let position = 0;
+    while (position < value.length) {
+      let c = value[position];
+      while (position < value.length && c !== "\u0022" && c !== "\u002C") {
+        temporaryValue += c;
+        position++;
+        c = value[position];
+      }
+      if (position < value.length && c === "\u0022") {
+        position++;
+        while (position < value.length && value[position] !== "\u0022") {
+          temporaryValue += value[position];
+          position++;
+        }
+        if (position < value.length) position++;
+        if (position < value.length) continue;
+      }
+      temporaryValue = StringPrototypeTrim(temporaryValue);
+      ArrayPrototypePush(values, temporaryValue);
+      temporaryValue = "";
+      if (position >= value.length) break;
+      // Current char is comma.
+      position++;
+    }
+    return values;
+  }
+
+  function isForbiddenRequestHeader(name, value) {
+    const lowerName = StringPrototypeToLowerCase(name);
+    if (ArrayPrototypeIncludes(FORBIDDEN_REQUEST_NAMES, lowerName)) {
+      return true;
+    }
+    if (
+      lowerName.startsWith("proxy-") || lowerName.startsWith("sec-")
+    ) {
+      return true;
+    }
+    if (ArrayPrototypeIncludes(FORBIDDEN_METHOD_NAMES, lowerName)) {
+      const methods = getDecodeSplitHeader(value);
+      for (let i = 0; i < methods.length; i++) {
+        if (isForbiddenMethod(methods[i])) return true;
+      }
+    }
+    return false;
+  }
+
+  function isForbiddenResponseHeaderName(name) {
+    const lowerName = StringPrototypeToLowerCase(name);
+    return lowerName === "set-cookie" || lowerName === "set-cookie2";
+  }
+
+  function isCorsUnsafeRequestHeaderByte(byte) {
+    return (byte < 0x20 && byte !== 0x09) ||
+      byte === 0x22 || byte === 0x28 || byte === 0x29 || byte === 0x3A ||
+      byte === 0x3C || byte === 0x3E || byte === 0x3F || byte === 0x40 ||
+      byte === 0x5B || byte === 0x5C || byte === 0x5D || byte === 0x7B ||
+      byte === 0x7D || byte === 0x7F;
+  }
+
+  function isNoCorsSafelistedRequestHeaderName(name) {
+    const lowerName = StringPrototypeToLowerCase(name);
+    return lowerName === "accept" || lowerName === "accept-language" ||
+      lowerName === "content-language" || lowerName === "content-type";
+  }
+
+  function isPrivilegedNoCorsRequestHeaderName(name) {
+    return StringPrototypeToLowerCase(name) === "range";
+  }
+
+  function parseSingleRangeHeaderValue(value) {
+    // allowWhitespace is false for no-CORS safelisting.
+    let position = 0;
+    if (value.substring(0, 5) !== "bytes") return null;
+    position = 5;
+    if (value[position] !== "\u003D") return null;
+    position++;
+    let rangeStart = "";
+    while (position < value.length) {
+      const c = value[position];
+      const code = StringPrototypeCharCodeAt(c, 0);
+      if (code >= 0x30 && code <= 0x39) {
+        rangeStart += c;
+        position++;
+      } else break;
+    }
+    const rangeStartValue = rangeStart === "" ? null : Number(rangeStart);
+    if (value[position] !== "\u002D") return null;
+    position++;
+    let rangeEnd = "";
+    while (position < value.length) {
+      const c = value[position];
+      const code = StringPrototypeCharCodeAt(c, 0);
+      if (code >= 0x30 && code <= 0x39) {
+        rangeEnd += c;
+        position++;
+      } else break;
+    }
+    const rangeEndValue = rangeEnd === "" ? null : Number(rangeEnd);
+    if (position !== value.length) return null;
+    if (rangeStartValue === null && rangeEndValue === null) return null;
+    if (
+      rangeStartValue !== null && rangeEndValue !== null &&
+      rangeStartValue > rangeEndValue
+    ) {
+      return null;
+    }
+    return [rangeStartValue, rangeEndValue];
+  }
+
+  function isNoCorsSafelistedRequestHeader(name, value) {
+    if (value.length > 128) return false;
+    const lowerName = StringPrototypeToLowerCase(name);
+    switch (lowerName) {
+      case "accept": {
+        for (let i = 0; i < value.length; i++) {
+          if (isCorsUnsafeRequestHeaderByte(StringPrototypeCharCodeAt(value, i))) {
+            return false;
+          }
+        }
+        return true;
+      }
+      case "accept-language":
+      case "content-language": {
+        for (let i = 0; i < value.length; i++) {
+          const byte = StringPrototypeCharCodeAt(value, i);
+          if (
+            (byte >= 0x30 && byte <= 0x39) ||
+            (byte >= 0x41 && byte <= 0x5A) ||
+            (byte >= 0x61 && byte <= 0x7A) ||
+            byte === 0x20 || byte === 0x2A || byte === 0x2C ||
+            byte === 0x2D || byte === 0x2E || byte === 0x3B || byte === 0x3D
+          ) {
+            continue;
+          }
+          return false;
+        }
+        return true;
+      }
+      case "content-type": {
+        for (let i = 0; i < value.length; i++) {
+          if (isCorsUnsafeRequestHeaderByte(StringPrototypeCharCodeAt(value, i))) {
+            return false;
+          }
+        }
+        const essence = StringPrototypeToLowerCase(
+          StringPrototypeTrim(value.split(";")[0]),
+        );
+        return essence === "application/x-www-form-urlencoded" ||
+          essence === "multipart/form-data" ||
+          essence === "text/plain";
+      }
+      case "range": {
+        const rangeValue = parseSingleRangeHeaderValue(value);
+        return rangeValue !== null && rangeValue[0] !== null;
+      }
+      default:
+        return false;
+    }
+  }
+
+  // --- Validation / append logic -------------------------------------------
+
+  function validateHeader(name, value, guard) {
+    if (!checkHeaderNameForHttpTokenCodePoint(name)) {
+      throw new TypeError(`Invalid header name: "${name}"`);
+    }
+    if (!checkForInvalidValueChars(value)) {
+      throw new TypeError(`Invalid header value: "${value}"`);
+    }
+    if (guard === "immutable") {
+      throw new TypeError("Cannot change headers: headers are immutable");
+    }
+    if (guard === "request" && isForbiddenRequestHeader(name, value)) {
+      return false;
+    }
+    if (guard === "response" && isForbiddenResponseHeaderName(name)) {
+      return false;
+    }
+    return true;
+  }
+
+  function appendHeader(headers, name, value) {
+    value = normalizeHeaderValue(value);
+    if (!validateHeader(name, value, headers[_guard])) return;
+    if (headers[_guard] === "request-no-cors") {
+      const existing = getHeader(headers[_list], name);
+      const temporaryValue = existing === null
+        ? value
+        : existing + "\x2C\x20" + value;
+      if (!isNoCorsSafelistedRequestHeader(name, temporaryValue)) {
+        return;
+      }
+    }
+    ArrayPrototypePush(headers[_list], [StringPrototypeToLowerCase(name), value]);
+    headers[_iterableHeadersCache] = undefined;
+  }
+
+  function setHeader(headers, name, value) {
+    value = normalizeHeaderValue(value);
+    if (!validateHeader(name, value, headers[_guard])) return;
+    if (headers[_guard] === "request-no-cors" &&
+      !isNoCorsSafelistedRequestHeader(name, value)) {
+      return;
+    }
+    const list = headers[_list];
+    const lowerName = StringPrototypeToLowerCase(name);
+    let w = 0;
+    let added = false;
+    for (let i = 0; i < list.length; i++) {
+      if (list[i][0] === lowerName) {
+        if (!added) {
+          list[w++] = [lowerName, value];
+          added = true;
+        }
+      } else {
+        list[w++] = list[i];
+      }
+    }
+    if (!added) {
+      ArrayPrototypePush(list, [lowerName, value]);
+    } else if (w !== list.length) {
+      ArrayPrototypeSplice(list, w);
+    }
+    headers[_iterableHeadersCache] = undefined;
+  }
+
+  function deleteHeader(headers, name) {
+    if (!checkHeaderNameForHttpTokenCodePoint(name)) {
+      throw new TypeError(`Invalid header name: "${name}"`);
+    }
+    if (headers[_guard] === "immutable") {
+      throw new TypeError("Cannot change headers: headers are immutable");
+    }
+    if (headers[_guard] === "request-no-cors" &&
+      !isNoCorsSafelistedRequestHeaderName(name) &&
+      !isPrivilegedNoCorsRequestHeaderName(name)) {
+      return;
+    }
+    const lowerName = StringPrototypeToLowerCase(name);
+    const list = headers[_list];
+    let w = 0;
+    for (let i = 0; i < list.length; i++) {
+      if (list[i][0] !== lowerName) list[w++] = list[i];
+    }
+    if (w !== list.length) {
+      ArrayPrototypeSplice(list, w);
+      headers[_iterableHeadersCache] = undefined;
+    }
+  }
+
+  function getHeader(list, name) {
+    const lowerName = StringPrototypeToLowerCase(name);
+    let value = null;
+    for (let i = 0; i < list.length; i++) {
+      if (list[i][0] === lowerName) {
+        value = value === null ? list[i][1] : value + ", " + list[i][1];
+      }
+    }
+    return value;
+  }
 
   // --- HeadersInit parsing -------------------------------------------------
 
-  /** Parse anything spec-legal as a `HeadersInit`: a sequence of
-   * `[name, value]` pairs (a real `Array`), a record (plain object),
-   * or another `Headers` instance. Shared with `Request`/`Response`'s
-   * `headers` init option and `fetch()`'s `init.headers`. Matches the
-   * previous Rust `parse_value`: only true JS Arrays take the sequence
-   * path (no general-iterable support), and record keys are read via
-   * `for...in` + own-property check (skips inherited enumerable keys). */
-  function parseHeadersInit(value) {
-    if (value === undefined || value === null) return [];
-    if (ArrayIsArray(value)) {
-      const pairs = [];
-      for (let i = 0; i < value.length; ++i) {
-        const entry = value[i];
-        const k = entry?.[0];
-        const v = entry?.[1];
-        ArrayPrototypePush(pairs, [
-          StringPrototypeToLowerCase(String(k)),
-          String(v),
-        ]);
+  function fillHeaders(headers, object) {
+    if (ArrayIsArray(object)) {
+      for (let i = 0; i < object.length; ++i) {
+        const header = object[i];
+        if (header.length !== 2) {
+          throw new TypeError(
+            `Invalid header: length must be 2, but is ${header.length}`,
+          );
+        }
+        appendHeader(headers, header[0], header[1]);
       }
-      return pairs;
+    } else {
+      for (const key in object) {
+        if (!ObjectHasOwn(object, key)) continue;
+        appendHeader(headers, key, object[key]);
+      }
     }
-    if (typeof value === "object") {
-      if (ObjectPrototypeIsPrototypeOf(HeadersPrototype, value)) {
-        return cloneHeaderPairs(value[_list]);
-      }
-      const pairs = [];
-      for (const key in value) {
-        if (!ObjectHasOwn(value, key)) continue;
-        ArrayPrototypePush(pairs, [
-          StringPrototypeToLowerCase(String(key)),
-          String(value[key]),
-        ]);
-      }
-      return pairs;
-    }
-    return [];
   }
 
-  /** Deep-copy a `[name, value][]` list (each pair is its own array —
-   * copy those too so mutating the clone never aliases the source). */
+  function parseHeadersInit(value) {
+    if (value === undefined || value === null) return [];
+    const init = webidl.converters["HeadersInit"](
+      value,
+      "Failed to execute 'parseHeadersInit'",
+      "Argument 1",
+    );
+    const out = [];
+    if (ArrayIsArray(init)) {
+      for (let i = 0; i < init.length; ++i) {
+        const header = init[i];
+        if (header.length !== 2) {
+          throw new TypeError(
+            `Invalid header: length must be 2, but is ${header.length}`,
+          );
+        }
+        ArrayPrototypePush(out, [
+          StringPrototypeToLowerCase(header[0]),
+          normalizeHeaderValue(header[1]),
+        ]);
+      }
+    } else {
+      for (const key in init) {
+        if (!ObjectHasOwn(init, key)) continue;
+        ArrayPrototypePush(out, [
+          StringPrototypeToLowerCase(key),
+          normalizeHeaderValue(init[key]),
+        ]);
+      }
+    }
+    return out;
+  }
+
   function cloneHeaderPairs(list) {
     const out = [];
     for (let i = 0; i < list.length; ++i) {
@@ -118,9 +448,6 @@
     return out;
   }
 
-  /** The spec's "sort and combine" for iteration: entries sorted by
-   * name, with same-named values joined by `", "` — except
-   * `set-cookie`, whose values are each emitted as their own entry. */
   function sortedAndCombined(list) {
     const names = [];
     for (let i = 0; i < list.length; ++i) {
@@ -159,56 +486,94 @@
 
   class Headers {
     [_list] = [];
+    [_guard] = "none";
+    [_iterableHeadersCache] = undefined;
+
+    get [_iterableHeaders]() {
+      const list = this[_list];
+      if (
+        this[_guard] === "immutable" &&
+        this[_iterableHeadersCache] !== undefined
+      ) {
+        return this[_iterableHeadersCache];
+      }
+      const seenHeaders = { __proto__: null };
+      const entries = [];
+      for (let i = 0; i < list.length; ++i) {
+        const entry = list[i];
+        const name = entry[0];
+        const value = entry[1];
+        if (name === "set-cookie") {
+          ArrayPrototypePush(entries, [name, value]);
+        } else {
+          const seenHeaderIndex = seenHeaders[name];
+          if (seenHeaderIndex !== undefined) {
+            const entryValue = entries[seenHeaderIndex][1];
+            entries[seenHeaderIndex][1] = entryValue.length > 0
+              ? entryValue + "\x2C\x20" + value
+              : value;
+          } else {
+            seenHeaders[name] = entries.length;
+            ArrayPrototypePush(entries, [name, value]);
+          }
+        }
+      }
+      ArrayPrototypeSort(
+        entries,
+        (a, b) => {
+          const akey = a[0];
+          const bkey = b[0];
+          if (akey > bkey) return 1;
+          if (akey < bkey) return -1;
+          return 0;
+        },
+      );
+      this[_iterableHeadersCache] = entries;
+      return entries;
+    }
 
     /** @param {HeadersInit} [init] */
     constructor(init = undefined) {
+      if (init === webidl.brand) {
+        this[webidl.brand] = webidl.brand;
+        return;
+      }
+      const prefix = "Failed to construct 'Headers'";
       this[webidl.brand] = webidl.brand;
-      this[_list] = parseHeadersInit(init);
+      if (init !== undefined) {
+        init = webidl.converters["HeadersInit"](init, prefix, "Argument 1");
+        fillHeaders(this, init);
+      }
     }
 
     append(name, value) {
       webidl.assertBranded(this, HeadersPrototype, "Headers");
       const prefix = "Failed to execute 'append' on 'Headers'";
       webidl.requiredArguments(arguments.length, 2, prefix);
-      name = StringPrototypeToLowerCase(String(name));
-      value = String(value);
-      ArrayPrototypePush(this[_list], [name, value]);
+      name = webidl.converters["ByteString"](name, prefix, "Argument 1");
+      value = webidl.converters["ByteString"](value, prefix, "Argument 2");
+      appendHeader(this, name, value);
     }
 
     delete(name) {
       webidl.assertBranded(this, HeadersPrototype, "Headers");
       const prefix = "Failed to execute 'delete' on 'Headers'";
       webidl.requiredArguments(arguments.length, 1, prefix);
-      name = StringPrototypeToLowerCase(String(name));
-      const list = this[_list];
-      let w = 0;
-      for (let i = 0; i < list.length; i++) {
-        if (list[i][0] !== name) list[w++] = list[i];
-      }
-      if (w !== list.length) ArrayPrototypeSplice(list, w);
+      name = webidl.converters["ByteString"](name, prefix, "Argument 1");
+      deleteHeader(this, name);
     }
 
-    /** `get(name)` — the *combined* value: every entry with this name,
-     * in insertion order, joined with `", "`. `null` if there are none. */
     get(name) {
       webidl.assertBranded(this, HeadersPrototype, "Headers");
       const prefix = "Failed to execute 'get' on 'Headers'";
       webidl.requiredArguments(arguments.length, 1, prefix);
-      name = StringPrototypeToLowerCase(String(name));
-      const list = this[_list];
-      let combined = null;
-      for (let i = 0; i < list.length; i++) {
-        if (list[i][0] === name) {
-          combined = combined === null
-            ? list[i][1]
-            : combined + ", " + list[i][1];
-        }
+      name = webidl.converters["ByteString"](name, prefix, "Argument 1");
+      if (!checkHeaderNameForHttpTokenCodePoint(name)) {
+        throw new TypeError(`Invalid header name: "${name}"`);
       }
-      return combined;
+      return getHeader(this[_list], name);
     }
 
-    /** `getSetCookie()` — every `set-cookie` value, in insertion
-     * order, as an array. The one header that must never be combined. */
     getSetCookie() {
       webidl.assertBranded(this, HeadersPrototype, "Headers");
       const list = this[_list];
@@ -223,10 +588,14 @@
       webidl.assertBranded(this, HeadersPrototype, "Headers");
       const prefix = "Failed to execute 'has' on 'Headers'";
       webidl.requiredArguments(arguments.length, 1, prefix);
-      name = StringPrototypeToLowerCase(String(name));
+      name = webidl.converters["ByteString"](name, prefix, "Argument 1");
+      if (!checkHeaderNameForHttpTokenCodePoint(name)) {
+        throw new TypeError(`Invalid header name: "${name}"`);
+      }
+      const lowerName = StringPrototypeToLowerCase(name);
       const list = this[_list];
       for (let i = 0; i < list.length; i++) {
-        if (list[i][0] === name) return true;
+        if (list[i][0] === lowerName) return true;
       }
       return false;
     }
@@ -235,83 +604,12 @@
       webidl.assertBranded(this, HeadersPrototype, "Headers");
       const prefix = "Failed to execute 'set' on 'Headers'";
       webidl.requiredArguments(arguments.length, 2, prefix);
-      name = StringPrototypeToLowerCase(String(name));
-      value = String(value);
-      const list = this[_list];
-      let w = 0;
-      let added = false;
-      for (let i = 0; i < list.length; i++) {
-        if (list[i][0] === name) {
-          if (!added) {
-            list[w++] = [name, value];
-            added = true;
-          }
-        } else {
-          list[w++] = list[i];
-        }
-      }
-      if (!added) {
-        ArrayPrototypePush(list, [name, value]);
-      } else if (w !== list.length) {
-        ArrayPrototypeSplice(list, w);
-      }
-    }
-
-    forEach(callback, thisArg) {
-      webidl.assertBranded(this, HeadersPrototype, "Headers");
-      const prefix = "Failed to execute 'forEach' on 'Headers'";
-      webidl.requiredArguments(arguments.length, 1, prefix);
-      if (typeof callback !== "function") {
-        throw new TypeError(`${prefix}: callback must be a function`);
-      }
-      const pairs = sortedAndCombined(this[_list]);
-      for (let i = 0; i < pairs.length; ++i) {
-        FunctionPrototypeCall(callback, thisArg, pairs[i][1], pairs[i][0], this);
-      }
-    }
-
-    entries() {
-      webidl.assertBranded(this, HeadersPrototype, "Headers");
-      return pairIterator(this[_list], "entries");
-    }
-
-    keys() {
-      webidl.assertBranded(this, HeadersPrototype, "Headers");
-      return pairIterator(this[_list], "keys");
-    }
-
-    values() {
-      webidl.assertBranded(this, HeadersPrototype, "Headers");
-      return pairIterator(this[_list], "values");
+      name = webidl.converters["ByteString"](name, prefix, "Argument 1");
+      value = webidl.converters["ByteString"](value, prefix, "Argument 2");
+      setHeader(this, name, value);
     }
   }
 
-  /** `entries()`/`keys()`/`values()`/`[Symbol.iterator]` all return a
-   * real `Array Iterator` over a snapshot built from the sorted +
-   * combined view — same approach as `10_form_data.js`'s
-   * `pairIterator`. */
-  function pairIterator(list, mode) {
-    const pairs = sortedAndCombined(list);
-    const snapshot = [];
-    for (let i = 0; i < pairs.length; ++i) {
-      if (mode === "keys") {
-        ArrayPrototypePush(snapshot, pairs[i][0]);
-      } else if (mode === "values") {
-        ArrayPrototypePush(snapshot, pairs[i][1]);
-      } else {
-        ArrayPrototypePush(snapshot, pairs[i]);
-      }
-    }
-    return snapshot[SymbolIterator]();
-  }
-
-  ObjectDefineProperty(Headers.prototype, SymbolIterator, {
-    __proto__: null,
-    value: Headers.prototype.entries,
-    writable: true,
-    configurable: true,
-    enumerable: false,
-  });
   ObjectDefineProperty(Headers.prototype, SymbolToStringTag, {
     __proto__: null,
     value: "Headers",
@@ -321,24 +619,46 @@
   });
   const HeadersPrototype = Headers.prototype;
 
-  // --- Internal factories (consumed by 21_request.js / 22_response.js /
-  // 23_fetch.js) ------------------------------------------------------------
+  webidl.mixinPairIterable("Headers", Headers, _iterableHeaders, 0, 1);
 
-  /** Build a `Headers` instance directly from an already-normalized
-   * `[name, value][]` list (skips `parseHeadersInit`). Used to mint
-   * headers for a `Request`/`Response`/`fetch()` result without
-   * round-tripping through `HeadersInit` conversion. */
-  function createHeaders(pairs) {
-    const h = new Headers();
+  // WebIDL `HeadersInit` union: `sequence<sequence<ByteString>>` or
+  // `record<ByteString, ByteString>` (a `Headers` instance is iterable, so it
+  // is handled by the sequence branch). The sequence branch is tried first so
+  // that overload resolution probes `Symbol.iterator` before the record
+  // branch probes `ownKeys`, matching the proxy-trap order asserted by WPT.
+  webidl.converters["HeadersInit"] = function (V, prefix, context, opts) {
+    try {
+      return webidl.converters["sequence<sequence<ByteString>>"](
+        V,
+        prefix,
+        context,
+        opts,
+      );
+    } catch {
+      return webidl.converters["record<ByteString, ByteString>"](
+        V,
+        prefix,
+        context,
+        opts,
+      );
+    }
+  };
+
+  // --- Internal factories --------------------------------------------------
+
+  function createHeaders(pairs, guard = "none") {
+    const h = new Headers(webidl.brand);
     h[_list] = pairs;
+    h[_guard] = guard;
     return h;
   }
 
-  /** Read the backing `[name, value][]` list out of a `Headers`
-   * instance (used for cloning and for building an outgoing `fetch()`
-   * request from a `Headers`/`Request`). */
   function getHeaderList(headers) {
     return headers[_list];
+  }
+
+  function guardFromHeaders(headers) {
+    return headers[_guard];
   }
 
   // --- Install as non-enumerable global -----------------------------------
@@ -354,6 +674,7 @@
   globalThis.__bootstrap.headers = {
     createHeaders,
     getHeaderList,
+    guardFromHeaders,
     cloneHeaderPairs,
     parseHeadersInit,
   };
