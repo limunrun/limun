@@ -110,6 +110,18 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     set_fn(scope, ops, "op_serialize", op_serialize);
     set_fn(scope, ops, "op_deserialize", op_deserialize);
 
+    // WebCrypto — `crypto.getRandomValues()`, `crypto.randomUUID()`, and
+    // `crypto.subtle.digest()` backing ops. The spec surface (the `Crypto`/
+    // `SubtleCrypto`/`CryptoKey` classes, WebIDL argument validation,
+    // algorithm name normalization, error-type selection, Promise wrapping
+    // for `digest`) lives in the JS module `ext:limun/03_crypto.js`; these
+    // ops are the irreducible native work: OS-entropy random byte
+    // generation, UUID v4 bit-fixing + hex formatting, and hash computation
+    // via the `sha1`/`sha2`/`sha3` crates.
+    set_fn(scope, ops, "op_crypto_get_random_values", op_crypto_get_random_values);
+    set_fn(scope, ops, "op_crypto_random_uuid", op_crypto_random_uuid);
+    set_fn(scope, ops, "op_crypto_digest", op_crypto_digest);
+
     crate::web::set_global(scope, global, "__limunOps", ops.into());
 }
 
@@ -1913,4 +1925,186 @@ fn op_deserialize(
             tc.rethrow();
         }
     }
+}
+
+// --- WebCrypto ops ---------------------------------------------------------
+//
+// WebCrypto `crypto.getRandomValues()` / `crypto.randomUUID()` /
+// `crypto.subtle.digest()` backing ops. The spec surface (the `Crypto`/
+// `SubtleCrypto`/`CryptoKey` classes, WebIDL argument validation, algorithm
+// name normalization, error-type selection, Promise wrapping for `digest`)
+// lives in the JS module `ext:limun/03_crypto.js`. These ops are flat: a
+// TypedArray in (filled in place), no return; a string out (UUID); a string
+// name + Uint8Array in, Uint8Array out (digest). Errors are bare TypeErrors;
+// the JS layer catches and rethrows as DOMException with the spec-correct
+// name (`NotSupportedError` for unknown algorithms, `TypeMismatchError` /
+// `QuotaExceededError` for getRandomValues — though those checks live in JS).
+
+/// `op_crypto_get_random_values(typedArray) -> undefined` — fill the backing
+/// store of an integer TypedArray with cryptographically-secure random bytes
+/// from the OS entropy source (`rand::rngs::OsRng`). The JS layer has already
+/// validated that `typedArray` is an integer TypedArray (not Float*Array or
+/// DataView) and that `byteLength <= 65536`. The fill is in-place — no return
+/// value; the JS side already holds the array reference and returns it.
+fn op_crypto_get_random_values(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use rand::RngCore;
+
+    let Ok(view) = <v8::Local<v8::ArrayBufferView>>::try_from(args.get(0)) else {
+        let msg = v8::String::new(
+            scope,
+            "getRandomValues: argument is not a TypedArray",
+        ).unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    };
+
+    let byte_offset = view.byte_offset();
+    let byte_length = view.byte_length();
+    if byte_length == 0 {
+        rv.set(v8::undefined(scope).into());
+        return;
+    }
+
+    let Some(ab) = view.buffer(scope) else {
+        let msg = v8::String::new(
+            scope,
+            "getRandomValues: cannot access backing ArrayBuffer (detached?)",
+        ).unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    };
+
+    let Some(data) = ab.data() else {
+        let msg = v8::String::new(
+            scope,
+            "getRandomValues: backing ArrayBuffer has no data (detached?)",
+        ).unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    };
+
+    // SAFETY: V8 guarantees byte_offset + byte_length is within the backing
+    // store, and a non-detached buffer has a non-null data ptr. The JS layer
+    // has already validated the array is not detached.
+    let slice = unsafe {
+        let ptr = data.as_ptr() as *mut u8;
+        std::slice::from_raw_parts_mut(ptr.add(byte_offset), byte_length)
+    };
+
+    // `OsRng` is a cryptographically-secure entropy source (reads from
+    // /dev/urandom on Linux, getrandom() syscall, etc.). `fill_bytes` is
+    // infallible for OsRng (it retries on EINTR).
+    rand::rngs::OsRng.fill_bytes(slice);
+
+    rv.set(v8::undefined(scope).into());
+}
+
+/// `op_crypto_random_uuid() -> String` — generate a v4 UUID (random bytes +
+/// version/variant bit-fixing) and return it as a formatted
+/// `xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx` string. Uses `OsRng` for the 16
+/// random bytes, then sets version (4) and variant (RFC 4122) bits per
+/// RFC 4122 §4.4.
+fn op_crypto_random_uuid(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use rand::RngCore;
+
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+
+    // Version 4 (random) — top 4 bits of byte 6 = 0b0100.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    // Variant RFC 4122 — top 2 bits of byte 8 = 0b10.
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    let hex = b"0123456789abcdef";
+    let buf = [
+        hex[(bytes[0] >> 4) as usize],
+        hex[(bytes[0] & 0x0f) as usize],
+        hex[(bytes[1] >> 4) as usize],
+        hex[(bytes[1] & 0x0f) as usize],
+        hex[(bytes[2] >> 4) as usize],
+        hex[(bytes[2] & 0x0f) as usize],
+        hex[(bytes[3] >> 4) as usize],
+        hex[(bytes[3] & 0x0f) as usize],
+        b'-',
+        hex[(bytes[4] >> 4) as usize],
+        hex[(bytes[4] & 0x0f) as usize],
+        hex[(bytes[5] >> 4) as usize],
+        hex[(bytes[5] & 0x0f) as usize],
+        b'-',
+        hex[(bytes[6] >> 4) as usize],
+        hex[(bytes[6] & 0x0f) as usize],
+        hex[(bytes[7] >> 4) as usize],
+        hex[(bytes[7] & 0x0f) as usize],
+        b'-',
+        hex[(bytes[8] >> 4) as usize],
+        hex[(bytes[8] & 0x0f) as usize],
+        hex[(bytes[9] >> 4) as usize],
+        hex[(bytes[9] & 0x0f) as usize],
+        b'-',
+        hex[(bytes[10] >> 4) as usize],
+        hex[(bytes[10] & 0x0f) as usize],
+        hex[(bytes[11] >> 4) as usize],
+        hex[(bytes[11] & 0x0f) as usize],
+        hex[(bytes[12] >> 4) as usize],
+        hex[(bytes[12] & 0x0f) as usize],
+        hex[(bytes[13] >> 4) as usize],
+        hex[(bytes[13] & 0x0f) as usize],
+        hex[(bytes[14] >> 4) as usize],
+        hex[(bytes[14] & 0x0f) as usize],
+        hex[(bytes[15] >> 4) as usize],
+        hex[(bytes[15] & 0x0f) as usize],
+    ];
+
+    // SAFETY: the buffer is all valid UTF-8 (ASCII hex + '-').
+    let s = unsafe { String::from_utf8_unchecked(buf.to_vec()) };
+    rv.set(v8::String::new(scope, &s).unwrap().into());
+}
+
+/// `op_crypto_digest(algorithmName: String, data: Uint8Array) -> Uint8Array`
+/// — compute the hash of `data` using the algorithm named by
+/// `algorithmName` (already normalized to uppercase by JS). Supported
+/// algorithms: SHA-1, SHA-256, SHA-384, SHA-512, SHA3-256, SHA3-384,
+/// SHA3-512. Returns a fresh Uint8Array with the digest. On unknown
+/// algorithm, throws a TypeError (the JS layer catches and rethrows as
+/// DOMException "NotSupportedError").
+fn op_crypto_digest(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use sha1::Sha1;
+    use sha2::{Sha256, Sha384, Sha512};
+    use sha3::{Sha3_256, Sha3_384, Sha3_512};
+    use sha2::Digest;
+
+    let algorithm = args.get(0).to_rust_string_lossy(scope);
+    let data = read_bytes(args.get(1)).unwrap_or_default();
+
+    let digest_bytes: Vec<u8> = match algorithm.as_str() {
+        "SHA-1" => Sha1::digest(&data).to_vec(),
+        "SHA-256" => Sha256::digest(&data).to_vec(),
+        "SHA-384" => Sha384::digest(&data).to_vec(),
+        "SHA-512" => Sha512::digest(&data).to_vec(),
+        "SHA3-256" => Sha3_256::digest(&data).to_vec(),
+        "SHA3-384" => Sha3_384::digest(&data).to_vec(),
+        "SHA3-512" => Sha3_512::digest(&data).to_vec(),
+        _ => {
+            let msg = v8::String::new(
+                scope,
+                &format!("digest: unrecognized algorithm name \"{algorithm}\""),
+            ).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    rv.set(vec_to_uint8_array(scope, digest_bytes).into());
 }

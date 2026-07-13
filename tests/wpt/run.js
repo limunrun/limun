@@ -313,6 +313,13 @@ const defaultFiles = [
   "fetch/api/headers/headers-combine.any.js",
   "fetch/api/headers/headers-structure.any.js",
   "fetch/api/headers/header-setcookie.any.js",
+  // --- WebCryptoAPI -------------------------------------------------------
+  "WebCryptoAPI/getRandomValues.any.js",
+  "WebCryptoAPI/randomUUID.https.any.js",
+  "WebCryptoAPI/digest/digest.https.any.js",
+  // Keep `headers-no-cors.any.js` last: it uses `fetch()` for a WPT
+  // fixture, and `currentScriptUrl` points at the last loaded file when
+  // the async harness starts running.
   "fetch/api/headers/headers-no-cors.any.js",
 ];
 

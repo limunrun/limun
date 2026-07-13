@@ -126,6 +126,18 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     // (`op_now`, `op_time_origin`) live in `core::ops`; the clock anchors
     // (`now_value`/`time_origin_value`, also used by `02_event.js` for
     // `Event.timeStamp` via the `op_now` op) live in `web::performance`.
+
+    // WebCrypto — `Crypto`/`SubtleCrypto`/`CryptoKey` classes + the
+    // `crypto` global are installed by the JS module
+    // `ext:limun/03_crypto.js` during bootstrap. Increment 1 covers
+    // `getRandomValues`, `randomUUID`, and `subtle.digest` (SHA-1/256/384/
+    // 512 + SHA3-256/384/512). The JS layer owns the spec surface (class
+    // shapes, WebIDL brand checks, algorithm name normalization, error-type
+    // selection, Promise wrapping for `digest`); the flat Rust ops
+    // (`op_crypto_get_random_values`, `op_crypto_random_uuid`,
+    // `op_crypto_digest`) in `core::ops` are the irreducible native work:
+    // OS-entropy random byte generation, UUID v4 bit-fixing + hex
+    // formatting, and hash computation via the `sha1`/`sha2`/`sha3` crates.
 }
 
 /// Install a platform global the way real engines do — own, writable,

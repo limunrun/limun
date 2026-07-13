@@ -83,6 +83,10 @@ pub static REGISTRY: &[InternalModule] = &[
         source: include_str!("../web/13_message_port.js"),
     },
     InternalModule {
+        specifier: "ext:limun/03_crypto.js",
+        source: include_str!("../web/03_crypto.js"),
+    },
+    InternalModule {
         specifier: "ext:limun/05_base64.js",
         source: include_str!("../web/05_base64.js"),
     },

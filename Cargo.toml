@@ -19,8 +19,19 @@ base64 = "0.22.1"
 
 # Subresource Integrity (import-map `integrity` field) — SHA-256 hashing of
 # fetched module bodies. Only sha256 is supported (spec allows sha384/sha512
-# too, but sha256 covers the common case).
+# too, but sha256 covers the common case). Also used by WebCrypto
+# `crypto.subtle.digest()` for SHA-256/384/512.
 sha2 = "0.11"
+
+# WebCrypto `crypto.subtle.digest()` — SHA-1 and SHA-3 family hash functions.
+# Pinned to match `sha2`'s `digest` crate version (0.11) to avoid duplicate
+# `digest` major versions in the dependency graph.
+sha1 = "0.11"
+sha3 = "0.12"
+
+# WebCrypto `crypto.getRandomValues()` / `crypto.randomUUID()` —
+# cryptographically-secure random byte generation via the OS entropy source.
+rand = "0.8"
 
 # WHATWG Encoding Standard legacy label table + decoders (same crate
 # Firefox/Servo use). TextDecoder routes all labels through this.

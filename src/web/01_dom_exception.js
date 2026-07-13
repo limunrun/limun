@@ -42,6 +42,7 @@
     ObjectDefineProperty,
     ObjectCreate,
     ObjectEntries,
+    ObjectHasOwn,
     ObjectPrototypeIsPrototypeOf,
     ObjectSetPrototypeOf,
     ReflectConstruct,
@@ -55,6 +56,8 @@
   const _name = Symbol("name");
   const _message = Symbol("message");
   const _code = Symbol("code");
+  const _quota = Symbol("quota");
+  const _requested = Symbol("requested");
 
   // --- Legacy constants (Web IDL §4.3) ------------------------------------
 
@@ -172,6 +175,71 @@
   ObjectSetPrototypeOf(DOMException.prototype, ErrorPrototype);
   const DOMExceptionPrototype = DOMException.prototype;
 
+  // `QuotaExceededError` — Web IDL §4.3.1
+  // (https://webidl.spec.whatwg.org/#quotaexceedederror). A subclass of
+  // `DOMException` that carries `quota` and `requested` properties (the
+  // amount that was requested vs. the limit that was hit). Used by the
+  // WebCrypto `getRandomValues` QuotaExceededError path and the WPT
+  // `assert_throws_quotaexceedederror` harness, which checks
+  // `e.constructor === self.QuotaExceededError` and the `requested`/
+  // `quota` property values.
+  class QuotaExceededError extends DOMException {
+    [_quota];
+    [_requested];
+
+    constructor(message = "", options = { __proto__: null }) {
+      super(message, "QuotaExceededError");
+
+      if (options !== null && typeof options === "object") {
+        if (ObjectHasOwn(options, "quota")) {
+          const quota = webidl.converters["unrestricted double"](
+            options.quota,
+            "Failed to construct 'QuotaExceededError'",
+            "'quota' member of QuotaExceededErrorOptions",
+          );
+          if (quota < 0) {
+            throw new RangeError(
+              "Failed to construct 'QuotaExceededError': quota must not be negative",
+            );
+          }
+          this[_quota] = quota;
+        } else {
+          this[_quota] = null;
+        }
+        if (ObjectHasOwn(options, "requested")) {
+          const requested = webidl.converters["unrestricted double"](
+            options.requested,
+            "Failed to construct 'QuotaExceededError'",
+            "'requested' member of QuotaExceededErrorOptions",
+          );
+          if (requested < 0) {
+            throw new RangeError(
+              "Failed to construct 'QuotaExceededError': requested must not be negative",
+            );
+          }
+          this[_requested] = requested;
+        } else {
+          this[_requested] = null;
+        }
+      } else {
+        this[_quota] = null;
+        this[_requested] = null;
+      }
+    }
+
+    get quota() {
+      webidl.assertBranded(this, QuotaExceededErrorPrototype, "QuotaExceededError");
+      return this[_quota];
+    }
+
+    get requested() {
+      webidl.assertBranded(this, QuotaExceededErrorPrototype, "QuotaExceededError");
+      return this[_requested];
+    }
+  }
+
+  const QuotaExceededErrorPrototype = QuotaExceededError.prototype;
+
   // Legacy `*_ERR` constants on both the constructor and the prototype
   // (`DOMException.INDEX_SIZE_ERR === 1`,
   // `DOMException.prototype.ABORT_ERR === 20`). Enumerable value props —
@@ -210,12 +278,19 @@
     ObjectDefineProperty(DOMExceptionPrototype, key, desc);
   }
 
-  // Install as a non-enumerable global — matches the previous Rust
+  // Install as non-enumerable globals — matches the previous Rust
   // `set_global` (DONT_ENUM) and every other constructible web class
-  // (`TextEncoder`, `URL`, …): `Object.keys(globalThis)` excludes it.
+  // (`TextEncoder`, `URL`, …): `Object.keys(globalThis)` excludes them.
   ObjectDefineProperty(globalThis, "DOMException", {
     __proto__: null,
     value: DOMException,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+  ObjectDefineProperty(globalThis, "QuotaExceededError", {
+    __proto__: null,
+    value: QuotaExceededError,
     writable: true,
     configurable: true,
     enumerable: false,
