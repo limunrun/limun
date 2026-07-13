@@ -71,8 +71,37 @@ progress across subagents and context compactions.
 bridges reduced or removed, `mod.rs` (global install wiring only). All spec-observable
 behavior lives in `src/js/`.
 
-## Core verification
-- [ ] Verify src/core/ (event loop, module/resolver, permissions, io, exceptions, rejections)
+## Core verification ✅ DONE
+
+- [x] Verify src/core/ (event loop, module/resolver, permissions, io, exceptions, rejections)
+
+**Verdict: complete and correct.** No bugs block web/ or the migration. Reviewed:
+event loop (bridge channel dispatch, microtask checkpoints, teardown ordering),
+module system (static/dynamic import, JSON/text attributes, `ext:` routing, SRI),
+permissions (glob matcher, deny/allow/default semantics, single choke point
+confirmed), exception/rejection reporting, `ops.rs` (1214 lines, no dead ops, no
+duplicates, every op called from `src/js/`), `internal_js.rs` registry order (no
+dependency violations — modules mutate `globalThis` directly, evaluated in
+registry order, no cross-module static imports).
+
+Two minor findings, both non-blocking (out of scope for this migration per
+"prefer NOT to rewrite core unless a failure traces to it or it blocks web"):
+- `event_loop.rs`: `clearTimeout`/`clearInterval` on an id after its one-shot
+  timer already fired naturally leaks an entry in the `CANCELLED` set (can't
+  distinguish "self-cancel mid-fire" from "stale clear after completion").
+  Slow, unbounded growth in very long-running processes with a
+  cleanup-always-clears pattern. Left as a follow-up — doesn't block web.
+- `internal_js.rs` doc comment claimed a referrer check for `ext:` imports
+  that isn't actually implemented (any importer can `import "ext:limun/…"`
+  directly) — fixed the doc to describe actual behavior; the missing
+  enforcement is a hardening task, not a migration requirement (harmless
+  today — importing an `ext:` module doesn't expose anything beyond
+  already-installed globals).
+
+Full test suite green: `tests/infra/proof.js`, `tests/unit/smoke_test.js`,
+`tests/unit/review_test.js`, `tests/limun/import_maps_test.js` all pass;
+WPT 752/753 (1 pre-existing MessageChannel gap, unrelated to core).
+`cargo build` clean, zero warnings.
 
 ## Post-migration cleanup found during fetch verification
 - `tests/unit/smoke_test.js` referenced the old non-spec `ReadableStreamReader` global
