@@ -72,7 +72,7 @@ fn encoder_encode(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue<v8::Value>,
 ) {
-    let input = if args.length() > 0 {
+    let input = if args.length() > 0 && !args.get(0).is_undefined() {
         args.get(0).to_rust_string_lossy(scope)
     } else {
         String::new()

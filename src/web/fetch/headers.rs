@@ -148,11 +148,11 @@ fn append(
     let name = args.get(0).to_rust_string_lossy(scope).to_lowercase();
     let value = args.get(1).to_rust_string_lossy(scope);
     let mut pairs = state.0.borrow_mut();
-    if let Some(existing) = pairs.iter_mut().find(|(k, _)| *k == name) {
-        existing.1 = format!("{}, {}", existing.1, value);
-    } else {
-        pairs.push((name, value));
-    }
+    // Per spec (and matching Deno), `append` always pushes a new entry —
+    // values are never combined at storage time. `get` combines on read
+    // by joining with ", ", except `set-cookie` which is never combined
+    // (hence `getSetCookie()` as a separate API).
+    pairs.push((name, value));
 }
 
 fn delete(

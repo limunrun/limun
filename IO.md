@@ -39,23 +39,32 @@ out how.
 
 ## The IO layer
 
-`src/core/io.rs` is the single choke-point for all byte-level operations in
-the entire project. Every IO operation — reading a file, fetching a URL,
-importing a module, streaming a response — goes through this file. No part of
-the project does raw IO; everything calls through `io`.
+`src/core/io.rs` is the permission gate for the whole project and the single
+place synchronous / module-loading byte IO happens. Every permission decision
+is made by one function (`permissions::check`), reached through this module.
+Reading a file, importing a module, streaming a module's source — all of it
+goes through `io`, and none of it touches bytes without first passing that one
+gate.
 
-### Why one choke-point
+The one transport that isn't (yet) routed through this file is `fetch()`: it
+owns its own async `reqwest` + tokio path in `crate::web::fetch`, because it
+predates the async surface here. But it makes its permission decision through
+the *same* `permissions::check` — it does not carry a second copy of the gate.
+Folding its transport onto `io`'s async variants is the eventual goal; sharing
+the gate is the invariant we hold today.
 
-1. **Permissions are global.** Every function in this file does a permission
-   check before touching bytes. Because all IO flows through here, there is
-   no way to bypass the permission system — no back door, no raw `std::fs`
-   call hidden in some other module that forgets to check. One gate, checked
-   every time.
+### Why one gate
+
+1. **There is exactly one permission check.** Every function here runs
+   `permissions::check` before touching bytes, and it's the only check in the
+   project. A second, "mirrored" check living in some other module is a bug,
+   not a feature: two checks drift, and the stale one becomes the hole. That's
+   why `fetch()` calls *this* gate rather than reimplementing it.
 
 2. **Protocol dispatch is centralized.** The caller doesn't need to know
    whether a URL is `file:`, `https:`, or `data:`. The IO layer inspects the
-   scheme and routes to the right handler. This means adding a new scheme
-   (if ever needed) is one place, not scattered across the codebase.
+   scheme and routes to the right handler. This means adding a new scheme (if
+   ever needed) is one place, not scattered across the codebase.
 
 3. **It's the foundation for everything.** Module loading, `fetch()`, future
    `Limun.fs.*`, future File System API — all of it sits on top of this. The
@@ -65,23 +74,56 @@ the project does raw IO; everything calls through `io`.
 
 ### What lives here
 
-- `read_file(path)` — read a local file as text
-- `fetch(url)` — fetch a remote URL (blocking, for the sync import path)
-- `decode_data_url(url)` — decode a `data:` URL (no permission check needed;
-  the bytes are in the specifier)
-- Future: streaming reads, writes, file open/close, etc.
+The IO layer is a URL-based file system library — a full FS surface, not a
+handful of read helpers. Every operation takes a `Url` and dispatches on
+scheme internally; the caller never picks a handler.
 
-Every function that does `file:` or `http`/`https` IO runs a permission check
-against the `io` allowlist. The scheme in the URL is the mechanism gate —
-`"file://**"` covers disk, `"https://**"` covers network. `data:` URLs are
-ungated — no IO happens, the bytes are already in the specifier.
+- `open(url)` — open a streaming `Reader` (implements `std::io::Read`) over
+  the URL. `file:` reads from disk, `http:`/`https:` streams the response
+  body (decompresses/decodes per headers), `data:` is an in-memory cursor.
+- `read(url)` / `read_to_string(url)` — convenience wrappers that buffer
+  the full body (what module loading uses).
+- `stat(url)` — filesystem metadata (size, is_dir, modified). `file:` only.
+- `list_dir(url)` — directory entries as fully-formed `file:` URLs.
+- `write_file(url, bytes)` — write bytes. `file:` only; `http:`/`https:`
+  is not a file system operation (use `fetch()`), `data:` is a category
+  error.
+- `resolve(specifier, referrer)` — resolve a relative specifier to an
+  absolute URL against the referrer (plain URL resolution, no import map).
+- `read_async(url)` / `open_async(url)` — async variants for the future
+  `Limun.fs.*` async surface. `read_async` buffers the whole body: `reqwest`
+  for `http:`/`https:`, `tokio::fs` for `file:`. `open_async` is `file:`-only
+  streaming (`tokio::fs::File`) for now — the network case is served by
+  `read_async` buffering until a streaming async reader lands.
+
+Every function that does `file:` or `http`/`https:` IO runs a permission
+check against the `io` allowlist *before* dispatching. The scheme in the URL
+is the mechanism gate — `"file://**"` covers disk, `"https://**"` covers
+network. `data:` URLs are ungated — no IO happens, the bytes are already in
+the specifier.
+
+For `file:` URLs, the path is **canonicalized before both the check and the
+operation**: symlinks and `..` are resolved first, the `file:` URL is rebuilt
+from the canonical path, and *that* is what the permission check matches. So a
+symlink can't be granted under one path and then resolve to a target outside
+the grant — the check and the read/write always see the same real path. (Not-
+yet-existing write targets canonicalize their parent and rejoin the final
+component, so a fresh file is still matched by its real location.)
+
+Writing is `file:` only: writing to `http:`/`https:` is rejected before the
+permission check (it's not an FS operation — use `fetch()`), and `data:` is
+rejected as a category error. Each non-`file:` scheme gets its own rejection
+message.
 
 ### Scope
 
 This file may grow large enough to warrant its own directory under `core/`
 (or even separate from `core/`). That's fine — the point is that it's the one
-place IO happens, not that it's one file. Split when it makes sense, but
-keep the choke-point property: nothing outside this module does raw IO.
+place the permission gate lives and the one place synchronous IO happens, not
+that it's one file. Split when it makes sense, but keep the invariant: exactly
+one permission check, and no synchronous raw IO outside this module. (`fetch()`
+is the one transport exception, and it still checks through this gate — see
+*Why one gate*.)
 
 ---
 
@@ -130,6 +172,10 @@ Pattern syntax (matched against the serialized URL):
 - `?` — one char except `/`
 - `**` — any run, `/` included
 - trailing `/` — prefix-match sugar (equivalent to `/**`)
+
+For `file:` URLs the path is canonicalized (symlinks and `..` resolved) before
+matching, so a pattern is matched against the *real* location, not a symlinked
+alias. Write your `file:` patterns against where the bytes actually live.
 
 #### `default` — the fallback grant
 

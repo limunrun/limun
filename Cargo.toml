@@ -9,8 +9,7 @@ name = "limun"
 path = "src/main.rs"
 
 [dependencies]
-# rusty_v8 — raw V8 bindings. Downloads a prebuilt static lib at build time.
-v8 = "150"
+v8 = "150.1.0"
 # limun.json parsing (import maps)
 serde_json = "1"
 url = "2.5.8"
@@ -30,7 +29,7 @@ encoding_rs = "0.8"
 # Async runtime — multi-thread so HTTP tasks run concurrently while the V8
 # isolate stays single-threaded on the main thread. The V8 thread never
 # enters the runtime; it only holds a Handle and spawns onto it.
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs"] }
 
 # Async HTTP client (replaces ureq for the fetch() global path; ureq stays
 # for the static-import module-load path which V8 forces synchronous).

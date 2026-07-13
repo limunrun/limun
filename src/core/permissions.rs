@@ -328,6 +328,7 @@ pub fn check(url: &Url, mode: Mode) -> Result<(), String> {
 
 /// Convenience: check a local-disk operation by `Path` (converted to a
 /// canonical `file:` URL first, so symlinks/`..` can't sidestep grants).
+#[allow(dead_code)]
 pub fn check_file(path: &Path, mode: Mode) -> Result<(), String> {
     let abs = absolutize(path);
     let url = Url::from_file_path(&abs)

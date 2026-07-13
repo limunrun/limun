@@ -69,6 +69,7 @@ fn main() -> ExitCode {
     let handle = rt.handle().clone();
     let rx = core::runtime::init(handle);
     core::event_loop::set_bridge_rx(rx);
+    core::event_loop::init_timer_channel();
 
     // --- V8 boot (once per process) ---
     let platform = v8::new_default_platform(0, false).make_shared();

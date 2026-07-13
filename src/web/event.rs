@@ -68,6 +68,10 @@ struct EventInternal {
     /// Set by `stopImmediatePropagation`; the dispatch loop polls this
     /// between listeners on the same target.
     stop_immediate: Cell<bool>,
+    /// Whether the event was dispatched by the user agent (true) or by
+    /// script (false). Abort events from `abort_signal()` set this to
+    /// `true`; script-constructed events default to `false`.
+    is_trusted: Cell<bool>,
     /// `performance.now()` captured at construction time.
     timestamp: f64,
     /// `null` until dispatch, then the target the event was dispatched
@@ -115,6 +119,11 @@ struct Listener {
 /// mutate the same map without double-borrowing the holder's field.
 struct EventTargetInternal {
     listeners: Rc<RefCell<HashMap<String, Vec<Listener>>>>,
+    /// `on<event>` handler attributes (DOM §2.11). Maps event type →
+    /// the user-set handler function (or `None` if set to null). The
+    /// wrapper listener registered via `addEventListener` reads this
+    /// map to find the current handler on each dispatch.
+    handlers: Rc<RefCell<HashMap<String, Option<v8::Global<v8::Function>>>>>,
 }
 
 fn is_event_target_instance(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
@@ -172,6 +181,13 @@ thread_local! {
     static SIG_REMOVERS: RefCell<HashMap<usize, SignalRemoverData>> = RefCell::new(HashMap::new());
     static TMO_ABORTS: RefCell<HashMap<usize, v8::Global<v8::Object>>> = RefCell::new(HashMap::new());
     static ANY_ABORTS: RefCell<HashMap<usize, v8::Global<v8::Object>>> = RefCell::new(HashMap::new());
+
+    /// Per-id data for the `on<event>` handler wrapper trampoline. The
+    /// trampoline is a native `Function` registered as a normal
+    /// `addEventListener` listener; when the event fires, it looks up the
+    /// current handler from the target's `handlers` map and calls it.
+    /// The event type is recovered from the V8 `info.data()` slot.
+    static ON_EVENT_WRAPPERS: RefCell<HashMap<usize, OnEventWrapperData>> = RefCell::new(HashMap::new());
 }
 
 /// Per-id data for the `addEventListener({signal})` auto-remove
@@ -183,6 +199,15 @@ struct SignalRemoverData {
     type_: v8::Global<v8::Value>,
     callback: v8::Global<v8::Function>,
     capture: bool,
+}
+
+/// Per-id data for the `on<event>` handler wrapper trampoline. Stores
+/// the target object and event type so the wrapper can look up the
+/// current handler from the target's `handlers` map and invoke it.
+#[derive(Clone)]
+struct OnEventWrapperData {
+    target: v8::Global<v8::Object>,
+    type_: String,
 }
 
 /// Mint a fresh one-shot trampoline id (shared counter across all three
@@ -295,7 +320,7 @@ fn build_event_target_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Loca
 
 fn build_abort_signal_template<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    event_target_tmpl: v8::Local<v8::FunctionTemplate>,
+    event_target_tmpl: v8::Local<'s, v8::FunctionTemplate>,
 ) -> v8::Local<'s, v8::FunctionTemplate> {
     let tmpl = v8::FunctionTemplate::new(scope, signal_constructor);
     tmpl.set_class_name(v8::String::new(scope, "AbortSignal").unwrap());
@@ -307,6 +332,13 @@ fn build_abort_signal_template<'s>(
     let instance = tmpl.instance_template(scope);
     set_readonly_accessor(scope, instance, "aborted", signal_get_aborted);
     set_readonly_accessor(scope, instance, "reason", signal_get_reason);
+    // DOM §2.11: `onabort` event handler attribute on AbortSignal.
+    let onabort_key = v8::String::new(scope, "onabort").unwrap();
+    let abort_data = v8::String::new(scope, "abort").unwrap();
+    let config = v8::AccessorConfiguration::new(on_event_getter)
+        .setter(on_event_setter)
+        .data(abort_data.into());
+    instance.set_accessor_with_configuration(onabort_key.into(), config);
 
     let proto = tmpl.prototype_template(scope);
     set_method(scope, proto, "throwIfAborted", signal_throw_if_aborted);
@@ -361,6 +393,7 @@ fn event_constructor(
             composed: Cell::new(composed),
             default_prevented: Cell::new(false),
             stop_immediate: Cell::new(false),
+            is_trusted: Cell::new(false),
             timestamp,
             target: RefCell::new(None),
             detail: RefCell::new(None),
@@ -463,10 +496,11 @@ fn event_get_timestamp(
 fn event_get_is_trusted(
     scope: &mut v8::PinScope,
     _key: v8::Local<v8::Name>,
-    _args: v8::PropertyCallbackArguments,
+    args: v8::PropertyCallbackArguments,
     mut rv: v8::ReturnValue<v8::Value>,
 ) {
-    rv.set(v8::Boolean::new(scope, false).into());
+    let v = event_state(scope, args.holder()).is_trusted.get();
+    rv.set(v8::Boolean::new(scope, v).into());
 }
 
 fn event_prevent_default(
@@ -527,6 +561,7 @@ fn custom_event_constructor(
             composed: Cell::new(composed),
             default_prevented: Cell::new(false),
             stop_immediate: Cell::new(false),
+            is_trusted: Cell::new(false),
             timestamp,
             target: RefCell::new(None),
             detail: RefCell::new(Some(v8::Global::new(scope, detail))),
@@ -610,6 +645,7 @@ fn event_target_constructor(
         0,
         EventTargetInternal {
             listeners: Rc::new(RefCell::new(HashMap::new())),
+            handlers: Rc::new(RefCell::new(HashMap::new())),
         },
     );
     rv.set(this.into());
@@ -863,6 +899,7 @@ fn signal_constructor(
         0,
         EventTargetInternal {
             listeners: Rc::new(RefCell::new(HashMap::new())),
+            handlers: Rc::new(RefCell::new(HashMap::new())),
         },
     );
     // Field 1: signal-specific state.
@@ -1116,6 +1153,127 @@ fn any_abort_trampoline(
 }
 
 // =========================================================================
+// on<event> handler attributes (DOM §2.11)
+// =========================================================================
+
+/// Getter for `on<event>` properties: returns the current handler (or
+/// `null` if none). The event type is passed via `info.data()` (a
+/// string).
+fn on_event_getter(
+    scope: &mut v8::PinScope,
+    _key: v8::Local<v8::Name>,
+    args: v8::PropertyCallbackArguments,
+    mut rv: v8::ReturnValue<v8::Value>,
+) {
+    let this = args.holder();
+    if !is_event_target_instance(scope, this) {
+        rv.set(v8::null(scope).into());
+        return;
+    }
+    let data = args.data();
+    let type_ = data.to_rust_string_lossy(scope);
+    let state = target_state(scope, this);
+    let handler = state.handlers.borrow().get(&type_).cloned().flatten();
+    match handler {
+        Some(g) => rv.set(v8::Local::new(scope, &g).into()),
+        None => rv.set(v8::null(scope).into()),
+    }
+}
+
+/// Setter for `on<event>` properties: stores the handler and registers
+/// a wrapper listener via `addEventListener` on first set. Subsequent
+/// sets just update the stored handler (the wrapper reads it from the
+/// `handlers` map on each dispatch, so no remove/re-add churn).
+fn on_event_setter(
+    scope: &mut v8::PinScope,
+    _key: v8::Local<v8::Name>,
+    value: v8::Local<v8::Value>,
+    args: v8::PropertyCallbackArguments,
+    _rv: v8::ReturnValue<()>,
+) {
+    let this = args.holder();
+    if !is_event_target_instance(scope, this) {
+        return;
+    }
+    let handler: Option<v8::Global<v8::Function>> = if value.is_function() {
+        let func: v8::Local<v8::Function> = value.try_into().unwrap();
+        Some(v8::Global::new(scope, func))
+    } else {
+        None
+    };
+
+    let data = args.data();
+    let type_ = data.to_rust_string_lossy(scope);
+
+    let state = target_state(scope, this);
+    let already_registered = state.handlers.borrow().contains_key(&type_);
+    state.handlers.borrow_mut().insert(type_.clone(), handler.clone());
+
+    if !already_registered && handler.is_some() {
+        let wrapper = make_on_event_wrapper(scope, this, &type_);
+        if let Some(wrapper_fn) = wrapper {
+            add_listener_internal(scope, this, &type_, wrapper_fn, false, false);
+        }
+    }
+}
+
+/// Build a native `Function` trampoline for the `on<event>` wrapper.
+/// When the event fires, this trampoline looks up the current handler
+/// from the target's `handlers` map and invokes it with the event.
+fn make_on_event_wrapper<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    target: v8::Local<v8::Object>,
+    type_: &str,
+) -> Option<v8::Local<'s, v8::Function>> {
+    let id = next_tramp_id();
+    ON_EVENT_WRAPPERS.with(|m| {
+        m.borrow_mut().insert(
+            id,
+            OnEventWrapperData {
+                target: v8::Global::new(scope, target),
+                type_: type_.to_string(),
+            },
+        );
+    });
+    let id_val = v8::Number::new(scope, id as f64).into();
+    let func = v8::Function::builder(on_event_wrapper_trampoline)
+        .data(id_val)
+        .build(scope)?;
+    Some(func)
+}
+
+/// Trampoline for `on<event>` handler dispatch. Reads the current
+/// handler from the target's `handlers` map and calls it with the event.
+fn on_event_wrapper_trampoline(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue<v8::Value>,
+) {
+    let id = args.data().number_value(scope).map(|n| n as usize).unwrap_or(0);
+    let data = ON_EVENT_WRAPPERS.with(|m| m.borrow().get(&id).cloned());
+    let Some(data) = data else { return };
+    let target = v8::Local::new(scope, &data.target);
+    if !is_event_target_instance(scope, target) {
+        return;
+    }
+    let state = target_state(scope, target);
+    let handler = state.handlers.borrow().get(&data.type_).cloned().flatten();
+    let Some(handler_global) = handler else { return };
+    let handler_local = v8::Local::new(scope, &handler_global);
+    let event_arg = args.get(0);
+    // Call the handler with `this` = target, event as argument.
+    {
+        v8::tc_scope!(let tc, scope);
+        let _ = handler_local.call(tc, target.into(), &[event_arg]);
+        if tc.has_caught() {
+            let msg = crate::core::exception::exception_text(tc);
+            eprintln!("limun: Uncaught (in event handler) {msg}");
+            tc.reset();
+        }
+    }
+}
+
+// =========================================================================
 // Shared signal logic
 // =========================================================================
 
@@ -1139,9 +1297,15 @@ fn abort_signal(
     *state.reason.borrow_mut() = Some(v8::Global::new(scope, reason));
 
     // Dispatch a plain `Event("abort")` on the signal via the inherited
-    // EventTarget machinery.
+    // EventTarget machinery. Per spec, abort events are trusted (fired by
+    // the user agent, not by script).
     let event = new_event_instance(scope, "abort");
     if is_event_target_instance(scope, signal) {
+        // Mark the event as trusted (isTrusted = true) since it was
+        // dispatched by the runtime, not by user script.
+        if is_event_instance(scope, event) {
+            event_state(scope, event).is_trusted.set(true);
+        }
         dispatch_internal(scope, signal, event);
     }
 }

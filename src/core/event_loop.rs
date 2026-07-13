@@ -13,10 +13,13 @@
 //!   - `ImportSource` — http(s) dynamic `import()` body → compile+eval+resolve
 //!   - `Timer`        — `tokio::time::sleep` elapsed → fire the JS callback
 //!
-//! Timers are tokio-driven: `schedule` spawns a task that sleeps then sends
-//! a `Timer` result back. `setInterval` re-arms from `fire_timer` by
-//! spawning a fresh task with a fresh `CancellationToken`. `clear` cancels
-//! by dropping the token, which cancels the in-flight sleep.
+//! Timers use a single background tokio task that manages a `BinaryHeap`
+//! of (deadline, sequence, timer_id) entries. This ensures timers with
+//! the same deadline fire in creation order (FIFO) — tokio's individual
+//! `time::sleep` does not guarantee ordering across independent sleeps.
+//! `setInterval` re-arms from `fire_timer` by pushing a new entry.
+//! `clear` cancels by dropping the token, which the background task
+//! checks via the cancelled set.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -40,6 +43,14 @@ struct Timer {
     cancel: Option<CancellationToken>,
 }
 
+/// Commands sent to the timer background task.
+enum TimerCmd {
+    /// Schedule a timer: (timer_id, delay, sequence, cancel_token)
+    Schedule(u32, Duration, u64, CancellationToken),
+    /// Cancel a timer: timer_id
+    Cancel(u32),
+}
+
 thread_local! {
     static TIMERS: RefCell<HashMap<u32, Timer>> = RefCell::new(HashMap::new());
     /// Marks ids cleared *while their own callback was running* (removed
@@ -48,6 +59,100 @@ thread_local! {
     static NEXT_ID: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
     /// Bridge receiver, installed once from `main.rs` before `core::execute`.
     static BRIDGE_RX: RefCell<Option<UnboundedReceiver<TaskResult>>> = const { RefCell::new(None) };
+    /// Sender for timer commands (schedule/cancel). Installed once.
+    static TIMER_TX: RefCell<Option<tokio::sync::mpsc::UnboundedSender<TimerCmd>>> = const { RefCell::new(None) };
+    /// Monotonic sequence counter for timer creation order (FIFO tiebreak).
+    static TIMER_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Install the timer command sender. Called once from `main.rs`.
+pub fn init_timer_channel() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TimerCmd>();
+    TIMER_TX.with(|cell| *cell.borrow_mut() = Some(tx));
+    // Spawn the timer scheduler background task.
+    crate::core::runtime::handle().spawn(async move {
+        use std::collections::BinaryHeap;
+        use tokio::time::{Instant, sleep_until};
+
+        /// A pending timer entry in the heap. Ordered by (deadline, sequence)
+        /// so the earliest-deadline timer fires first, and ties broken by
+        /// creation order (FIFO).
+        struct Pending {
+            deadline: Instant,
+            seq: u64,
+            timer_id: u32,
+            cancel: CancellationToken,
+        }
+        impl PartialEq for Pending {
+            fn eq(&self, o: &Self) -> bool { self.deadline == o.deadline && self.seq == o.seq }
+        }
+        impl Eq for Pending {}
+        impl PartialOrd for Pending {
+            fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(o))
+            }
+        }
+        impl Ord for Pending {
+            fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+                // BinaryHeap is max-heap; we want min-heap, so reverse.
+                // Compare by (deadline, seq) — earliest first.
+                o.deadline.cmp(&self.deadline).then(o.seq.cmp(&self.seq))
+            }
+        }
+
+        let mut heap: BinaryHeap<Pending> = BinaryHeap::new();
+        let mut cancelled: HashSet<u32> = HashSet::new();
+
+        loop {
+            if let Some(p) = heap.peek() {
+                let sleep = sleep_until(p.deadline);
+                tokio::select! {
+                    cmd = rx.recv() => {
+                        match cmd {
+                            Some(TimerCmd::Schedule(id, delay, seq, cancel)) => {
+                                let deadline = Instant::now() + delay;
+                                heap.push(Pending { deadline, seq, timer_id: id, cancel });
+                            }
+                            Some(TimerCmd::Cancel(id)) => {
+                                cancelled.insert(id);
+                            }
+                            None => break,
+                        }
+                    }
+                    _ = sleep => {
+                        // The earliest timer's deadline has passed.
+                        while let Some(entry) = heap.peek() {
+                            if entry.deadline > Instant::now() {
+                                break;
+                            }
+                            let entry = heap.pop().unwrap();
+                            // Check if cancelled (via TimerCmd::Cancel).
+                            if cancelled.remove(&entry.timer_id) {
+                                continue;
+                            }
+                            if entry.cancel.is_cancelled() {
+                                continue;
+                            }
+                            let tx = crate::core::runtime::tx().clone();
+                            let _ = tx.send(TaskResult::Timer { timer_id: entry.timer_id });
+                        }
+                    }
+                }
+            } else {
+                // No timers: just wait for a command.
+                match rx.recv().await {
+                    Some(TimerCmd::Schedule(id, delay, seq, cancel)) => {
+                        let deadline = Instant::now() + delay;
+                        heap.push(Pending { deadline, seq, timer_id: id, cancel });
+                    }
+                    Some(TimerCmd::Cancel(id)) => {
+                        cancelled.insert(id);
+                    }
+                    None => break,
+                }
+            }
+        }
+    });
 }
 
 /// Install the bridge receiver. Called once from `main.rs` before the V8
@@ -71,6 +176,11 @@ pub fn schedule(
         c.set(id.wrapping_add(1).max(1));
         id
     });
+    let seq = TIMER_SEQ.with(|c| {
+        let s = c.get();
+        c.set(s.wrapping_add(1));
+        s
+    });
     let cancel = CancellationToken::new();
     let timer = Timer {
         callback,
@@ -79,23 +189,12 @@ pub fn schedule(
         cancel: Some(cancel.clone()),
     };
     TIMERS.with(|t| t.borrow_mut().insert(id, timer));
-    spawn_timer_sleep(id, delay, cancel);
-    id
-}
-
-/// Spawn the tokio sleep that will fire this timer. Separate from
-/// `schedule` so the interval re-arm path can call it without allocating
-/// a fresh `Timer` struct.
-fn spawn_timer_sleep(timer_id: u32, delay: Duration, cancel: CancellationToken) {
-    let tx = crate::core::runtime::tx().clone();
-    crate::core::runtime::handle().spawn(async move {
-        tokio::select! {
-            _ = cancel.cancelled() => {}
-            _ = tokio::time::sleep(delay) => {
-                let _ = tx.send(TaskResult::Timer { timer_id });
-            }
+    TIMER_TX.with(|tx| {
+        if let Some(tx) = tx.borrow().as_ref() {
+            let _ = tx.send(TimerCmd::Schedule(id, delay, seq, cancel));
         }
     });
+    id
 }
 
 /// `clearTimeout`/`clearInterval`: cancel a scheduled (or currently-firing,
@@ -110,6 +209,12 @@ pub fn clear(id: u32) {
             c.borrow_mut().insert(id);
         });
     }
+    // Notify the background task to skip this timer if it hasn't fired yet.
+    TIMER_TX.with(|tx| {
+        if let Some(tx) = tx.borrow().as_ref() {
+            let _ = tx.send(TimerCmd::Cancel(id));
+        }
+    });
 }
 
 /// Drive the loop: block on the bridge channel, dispatch each result,
@@ -246,6 +351,11 @@ fn fire_timer(scope: &mut v8::PinScope, id: u32) {
     if let Some(interval) = timer.repeat {
         let self_cancelled = CANCELLED.with(|c| c.borrow_mut().remove(&id));
         if !self_cancelled {
+            let seq = TIMER_SEQ.with(|c| {
+                let s = c.get();
+                c.set(s.wrapping_add(1));
+                s
+            });
             let cancel = CancellationToken::new();
             TIMERS.with(|t| {
                 t.borrow_mut().insert(
@@ -258,7 +368,11 @@ fn fire_timer(scope: &mut v8::PinScope, id: u32) {
                     },
                 );
             });
-            spawn_timer_sleep(id, interval, cancel);
+            TIMER_TX.with(|tx| {
+                if let Some(tx) = tx.borrow().as_ref() {
+                    let _ = tx.send(TimerCmd::Schedule(id, interval, seq, cancel));
+                }
+            });
         }
     }
 }

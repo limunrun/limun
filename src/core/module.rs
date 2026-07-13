@@ -11,6 +11,7 @@
 
 use crate::core::exception::exception_text;
 use crate::core::import_map;
+use crate::core::internal_js;
 use crate::core::io;
 use crate::core::resolver::resolve_specifier;
 use crate::core::state::{MODULE_URLS, REGISTRY, SYNTHETIC_EXPORTS};
@@ -103,6 +104,26 @@ pub fn load_module_from_source<'s>(
     Some(module)
 }
 
+/// Compile (or fetch from registry) an internal `ext:limun/…` module.
+/// Bypasses `core::io` and `core::permissions` — internal modules are
+/// embedded in the binary and trusted. The specifier is parsed into a
+/// synthetic `Url` for the dedup cache key, so a static and a dynamic
+/// import of the same internal module share one compiled instance.
+fn load_internal<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    specifier: &str,
+) -> Option<v8::Local<'s, v8::Module>> {
+    let Some(source) = internal_js::source_for(specifier) else {
+        throw(
+            scope,
+            &format!("cannot resolve \"{specifier}\": not in internal module registry"),
+        );
+        return None;
+    };
+    let url = internal_js::specifier_url(specifier).unwrap();
+    load_module_from_source(scope, &url, ModuleKind::JavaScript, source)
+}
+
 fn compile_js_module<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     url: &Url,
@@ -168,23 +189,12 @@ fn synthetic_evaluation_steps<'s>(
     Some(v8::undefined(scope).into())
 }
 
-/// Dispatch on scheme: `file:` reads local disk, `http(s):` fetches over
-/// the network, `data:` decodes inline. All three go through `core::io`
-/// (see its doc comment on the fs/net permission choke point).
+/// Read the module body as UTF-8 source text. The scheme dispatch lives in
+/// `core::io::read_to_string` — `file:` reads disk, `http(s):` fetches the
+/// network, `data:` decodes inline. Permission checks happen inside `io`
+/// (one choke-point: see `core::io`'s doc comment).
 fn read_source(url: &Url) -> Result<String, String> {
-    match url.scheme() {
-        "file" => {
-            let path = url
-                .to_file_path()
-                .map_err(|_| format!("invalid file URL: {url}"))?;
-            io::read_file(&path)
-        }
-        "http" | "https" => io::fetch(url),
-        "data" => io::decode_data_url(url),
-        scheme => Err(format!(
-            "cannot resolve \"{url}\": unsupported scheme \"{scheme}:\" (only file/http/https/data are supported)"
-        )),
-    }
+    io::read_to_string(url).map_err(|e| format!("cannot resolve \"{url}\": {e}"))
 }
 
 /// Subresource Integrity check: if the import map declared an `integrity`
@@ -278,6 +288,13 @@ pub fn resolve_module_callback<'s>(
 
     let specifier = specifier.to_rust_string_lossy(scope);
 
+    // Internal `ext:` modules bypass the IO/permission path — they're
+    // embedded in the binary (see `internal_js`). The bootstrap sequence
+    // (and internal modules importing each other) name them directly.
+    if internal_js::is_internal(&specifier) {
+        return load_internal(scope, &specifier);
+    }
+
     // Static layout includes a per-attribute source offset: step 3.
     let kind = match extract_module_kind(scope, import_attributes, 3) {
         Ok(k) => k,
@@ -334,6 +351,50 @@ pub fn dynamic_import_callback<'s>(
     };
 
     let specifier = specifier.to_rust_string_lossy(scope);
+
+    // Internal `ext:` modules via dynamic `import()` — same short-circuit
+    // as the static path. Internal modules are trusted/ungated; user code
+    // reaching an `ext:` specifier here is unusual but not blocked (the
+    // specifiers are embedded in the binary, so there's no privilege
+    // boundary to enforce — they're just internal APIs).
+    if internal_js::is_internal(&specifier) {
+        let resolver = v8::PromiseResolver::new(scope)?;
+        let promise = resolver.get_promise(scope);
+        v8::tc_scope!(let tc, scope);
+        match load_internal(tc, &specifier) {
+            Some(module) => {
+                if module.instantiate_module(tc, resolve_module_callback).is_none() {
+                    let msg = exception_text(tc);
+                    let s = v8::String::new(tc, &msg).unwrap();
+                    let exc = v8::Exception::type_error(tc, s);
+                    let _ = resolver.reject(tc, exc);
+                } else {
+                    let _ = module.evaluate(tc);
+                    if module.get_status() == v8::ModuleStatus::Errored {
+                        let _ = resolver.reject(tc, module.get_exception());
+                    } else if tc.has_caught() {
+                        let msg = exception_text(tc);
+                        let s = v8::String::new(tc, &msg).unwrap();
+                        let exc = v8::Exception::type_error(tc, s);
+                        let _ = resolver.reject(tc, exc);
+                    } else {
+                        let _ = resolver.resolve(tc, module.get_module_namespace());
+                    }
+                }
+            }
+            None => {
+                let msg = v8::String::new(
+                    tc,
+                    &format!("cannot resolve \"{specifier}\": not in internal module registry"),
+                )
+                .unwrap();
+                let exc = v8::Exception::type_error(tc, msg);
+                let _ = resolver.reject(tc, exc);
+            }
+        }
+        return Some(promise);
+    }
+
     let referrer_url = resource_name
         .to_string(scope)
         .map(|s| s.to_rust_string_lossy(scope))
