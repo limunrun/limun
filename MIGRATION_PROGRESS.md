@@ -260,6 +260,32 @@ Deviations from Deno:
 - No `core.registerTransferableResource`/`Transferable`/`*TransferSteps` —
   brand-symbol mechanism.
 
+### 3c. Console — real recursive inspector ✅ DONE
+
+Replaced the 560-line flat-ToString `src/web/01_console.js` with a 3008-line
+recursive inspector ported from Deno's pure-JS console (the `d400a15db^`
+version, pre-Rust-port). Handles objects/arrays/typed arrays/ArrayBuffer/
+DataView/Map/Set/Date/RegExp/Error/Promise/WeakMap/WeakSet/boxed primitives/
+circular refs (`<ref *1>`/`[Circular *1]`). All 19 `console.*` methods:
+`log`/`info`/`debug`/`warn`/`error`/`assert`/`clear`/`dir`/`dirxml`/`table`
+(full box-drawn `cliTable`)/`trace`/`count`/`countReset`/`group`/`groupCollapsed`/
+`groupEnd`/`time`/`timeLog`/`timeEnd`. %-substitution (`%s`/`%d`/`%i`/`%f`/
+`%o`/`%O`/`%c`/`%%`/`%j`). `createFilteredInspectProxy` exposed on
+`globalThis.__bootstrap.console`.
+
+Deno ops replaced with primordials: `op_now(hrU8)` → `op_now()` (returns f64);
+`core.is*` type checks → `ObjectPrototypeIsPrototypeOf`/`ObjectPrototypeToString`;
+`op_get_constructor_name` → `v.constructor?.name`; `op_get_non_index_property_names`
+→ `ReflectOwnKeys` + index filter; `op_preview_entries` → `Array.from(value.entries())`.
+
+Deviations: no ANSI colors/CSS (`%c` arg consumed, no styling); Promise always
+`<pending>` (no `core.getPromiseDetails`); WeakMap/WeakSet `<items unknown>`
+(no `op_preview_entries` for weak); no custom inspect (`Deno.privateCustomInspect`
+dropped); URL inspected as regular object.
+
+WPT: **1911/1915** (+23 console tests, all green). Build clean 0 warnings;
+all unit/infra tests pass.
+
 ## Notes
 - Build: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo build`
 - WPT: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo run -- tests/wpt/run.js`

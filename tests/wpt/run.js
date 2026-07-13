@@ -239,6 +239,15 @@ const defaultFiles = [
   //   `html/infrastructure/safe-passing-of-structured-data/messagechannel.any.js`
   //   — META loads `/common/sab.js` (SharedArrayBuffer) + the structured-
   //   clone battery-of-tests, neither of which is self-contained here.
+  // --- Console Standard ---------------------------------------------------
+  // Full recursive inspector in `ext:limun/01_console.js`. Skip
+  // `console/idlharness.any.js` (IDL harness infra not present).
+  "console/console-is-a-namespace.any.js",
+  "console/console-label-conversion.any.js",
+  "console/console-log-large-array.any.js",
+  "console/console-log-symbol.any.js",
+  "console/console-namespace-object-class-string.any.js",
+  "console/console-tests-historical.any.js",
 ];
 
 // When --suite=<name> is given, discover .any.js files under suite/<name>/.
