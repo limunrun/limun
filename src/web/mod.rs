@@ -90,9 +90,19 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     // `Headers`/`Response` are constructible classes (non-enumerable).
     fetch::install(scope, global);
 
-    // Streams Standard — `ReadableStream`/`ReadableStreamReader`
-    // (interface objects, non-enumerable). Used by `Response.body`.
-    streams::install(scope, global);
+    // Streams Standard — `ReadableStream`/`ReadableStreamDefaultReader`/
+    // `ReadableStreamDefaultController` (interface objects,
+    // non-enumerable). Installed by the JS module `ext:limun/06_streams.js`
+    // during bootstrap (real constructible classes). The JS layer owns
+    // the spec surface (stream state machine, queue, read requests,
+    // lock, cancel, async iteration); the Rust side
+    // (`web::streams::new_fixed_stream`) is only a thin bridge so
+    // `Response.body` / `Request.body` / `Blob.stream()` can mint fixed
+    // (fully-buffered) streams by calling the cached JS factory
+    // (`createFixedReadableStream`) — same pattern as `DOMException`'s
+    // `new_instance`.
+    //
+    // `blob`/`form_data` (below) build on the streams surface.
 
     // File API + XHR Standard — `Blob`/`FormData` (interface objects,
     // non-enumerable). `Blob` is used by `Response.blob()`; `FormData` by

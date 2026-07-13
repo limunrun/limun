@@ -55,7 +55,7 @@ progress across subagents and context compactions.
 - [x] url / url_search_params (JS port, 6 handle-based ops, 61 smoke tests)
 - [ ] fetch/* (fetch, Headers, Response, Request)
 - [ ] blob / form_data
-- [ ] streams
+- [x] streams (JS port, start-only; Rust bridge for blob/fetch stream creation)
 
 ## Core verification
 - [ ] Verify src/core/ (event loop, module/resolver, permissions, io, exceptions, rejections)

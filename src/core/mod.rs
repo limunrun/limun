@@ -103,6 +103,14 @@ pub fn execute(isolate: &mut v8::Isolate, entry: &Url) -> ExitCode {
     // instances without a `globalThis` lookup.
     web::dom_exception::cache_ctor(tc);
 
+    // Cache the JS-defined `createFixedReadableStream` factory for Rust
+    // callers (`Response.body` / `Request.body` / `Blob.stream()`). The
+    // factory was installed on `globalThis.__bootstrap` by
+    // `ext:limun/06_streams.js` in the loop above; stash a `v8::Global` so
+    // `streams::new_fixed_stream` can mint fixed (fully-buffered)
+    // streams without a `globalThis` lookup.
+    web::streams::cache_factory(tc);
+
     // The entry point is always plain JS — import attributes only make
     // sense on an `import` statement/expression, and there's no such thing
     // for the script you hand to `limun` on the command line.
