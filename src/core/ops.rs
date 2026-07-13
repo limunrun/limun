@@ -22,6 +22,8 @@ use base64::Engine as _;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use crate::core::event_loop;
+
 /// Install the `__limunOps` namespace on `globalThis` with every registered
 /// op attached. Called once from `core::mod::execute`, before internal JS
 /// modules evaluate (so primordials/infra modules can call ops during
@@ -31,6 +33,7 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     let ops = v8::Object::new(scope);
 
     set_fn(scope, ops, "op_test_add", op_test_add);
+    set_fn(scope, ops, "op_print", op_print);
     set_fn(scope, ops, "op_base64_atob", op_base64_atob);
     set_fn(scope, ops, "op_base64_btoa", op_base64_btoa);
     set_fn(scope, ops, "op_encoding_normalize_label", op_encoding_normalize_label);
@@ -39,6 +42,9 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     set_fn(scope, ops, "op_encoding_decode", op_encoding_decode);
     set_fn(scope, ops, "op_encoding_decode_finish", op_encoding_decode_finish);
     set_fn(scope, ops, "op_encoding_encode_into", op_encoding_encode_into);
+    set_fn(scope, ops, "op_timer_schedule", op_timer_schedule);
+    set_fn(scope, ops, "op_timer_clear", op_timer_clear);
+    set_fn(scope, ops, "op_queue_microtask", op_queue_microtask);
 
     crate::web::set_global(scope, global, "__limunOps", ops.into());
 }
@@ -55,6 +61,29 @@ fn op_test_add(
     let b = args.get(1).integer_value(scope).unwrap_or(0);
     let sum = v8::Number::new(scope, (a + b) as f64);
     rv.set(sum.into());
+}
+
+/// `op_print(text: String, is_err: bool) -> undefined` — writes `text` to
+/// stdout (`is_err: false`) or stderr (`is_err: true`). The irreducible
+/// native work backing `console` (WHATWG Console Standard §2.1 "Printer").
+/// All formatting, group indentation, table layout, and timer/count
+/// state lives in `ext:limun/01_console.js`; this op only does the write.
+/// `text` is a UTF-8 `String` (V8 → Rust lossy), printed with a trailing
+/// newline (the JS layer does not include one — matches the previous
+/// Rust impl, which used `println!`/`eprintln!`).
+fn op_print(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let text = args.get(0).to_rust_string_lossy(scope);
+    let is_err = args.get(1).boolean_value(scope);
+    if is_err {
+        eprintln!("{text}");
+    } else {
+        println!("{text}");
+    }
+    rv.set(v8::undefined(scope).into());
 }
 
 /// `op_base64_btoa(input: String) -> String` — encodes a "binary string"
@@ -512,4 +541,89 @@ fn op_encoding_encode_into(
 
     let packed = (read as f64) * ((1u64 << 32) as f64) + (written as f64);
     rv.set(v8::Number::new(scope, packed).into());
+}
+
+// --- Timers ops ------------------------------------------------------------
+//
+// WHATWG HTML `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval`/
+// `queueMicrotask` backing ops. The spec surface (the `this` check,
+// WebIDL `long` coercion of the timeout, string-callback indirect eval,
+// extra-args handling, numeric ID exposure) lives in the JS module
+// `ext:limun/02_timers.js`. These ops are flat: a JS callback + delay +
+// repeat flag in, numeric ID out; an ID in, nothing out. The timer
+// scheduling machinery (timer wheel, tokio integration, callback
+// execution) stays in `core::event_loop` — it's irreducible native work
+// (thread coordination, tokio runtime, binary heap of deadlines).
+//
+// `op_timer_schedule` is a `FunctionCallback` (not a flat "primitive in,
+// primitive out" op) because the callback is a `v8::Function` that must
+// be captured as a `v8::Global<v8::Function>` and handed to
+// `event_loop::schedule`. This is the same pattern the previous Rust
+// `web::timers` module used — just relocated here and renamed.
+
+/// `op_timer_schedule(callback: Function, delay: number, repeat: boolean,
+/// ...args) -> number` — capture the callback + extra args, call
+/// `event_loop::schedule`, return the numeric timer ID. `delay` is in
+/// milliseconds (the JS layer has already done WebIDL `long` coercion;
+/// `event_loop::schedule` clamps negatives to 0). `repeat = true` arms an
+/// interval (re-fires every `delay` ms); `repeat = false` arms a one-shot.
+fn op_timer_schedule(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    // The callback must be a function — the JS layer has validated this
+    // (string-callback eval is resolved to a function in JS before calling
+    // this op). A non-function here is a JS-layer bug, not a user error;
+    // match the previous Rust behavior and return a 0 (no-op) handle.
+    let Ok(callback): Result<v8::Local<v8::Function>, _> = args.get(0).try_into() else {
+        rv.set(v8::Number::new(scope, 0.0).into());
+        return;
+    };
+
+    let delay_ms = args.get(1).number_value(scope).unwrap_or(0.0);
+    let repeat = args.get(2).boolean_value(scope);
+
+    // Extra arguments (setTimeout(fn, ms, a, b) -> fn(a, b)) per spec.
+    // Starts at index 3: callback, delay, repeat, ...args.
+    let extra_args: Vec<v8::Global<v8::Value>> = (3..args.length())
+        .map(|i| v8::Global::new(scope, args.get(i)))
+        .collect();
+
+    let callback_global = v8::Global::new(scope, callback);
+    let id = event_loop::schedule(callback_global, extra_args, delay_ms, repeat);
+    rv.set(v8::Number::new(scope, id as f64).into());
+}
+
+/// `op_timer_clear(id: number) -> undefined` — cancel a scheduled timer.
+/// No-op on unknown ids, matches spec. The JS layer has already coerced
+/// `id` to a number and validated it's finite and ≥ 0.
+fn op_timer_clear(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if let Some(id) = args.get(0).number_value(scope) {
+        if id.is_finite() && id >= 0.0 {
+            event_loop::clear(id as u32);
+        }
+    }
+    rv.set(v8::undefined(scope).into());
+}
+
+/// `op_queue_microtask(callback: Function) -> undefined` — enqueue
+/// `callback` directly on V8's microtask queue (not the timer wheel; runs
+/// before any timer, same tick). The JS layer has validated the callback
+/// is a function. Cannot be done in pure JS — V8 doesn't expose
+/// `enqueueMicrotask` to JS directly (the primordials' `queueMicrotask`
+/// slot is wired to this op by `02_timers.js`).
+fn op_queue_microtask(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if let Ok(callback) = <v8::Local<v8::Function>>::try_from(args.get(0)) {
+        scope.enqueue_microtask(callback);
+    }
+    rv.set(v8::undefined(scope).into());
 }

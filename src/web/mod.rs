@@ -6,7 +6,6 @@
 //! `window` itself: there is no browsing context here to name.
 
 pub mod blob;
-pub mod console;
 pub mod dom_exception;
 pub mod event;
 pub mod fetch;
@@ -15,7 +14,6 @@ mod native;
 pub mod performance;
 pub mod prompt;
 pub mod streams;
-pub mod timers;
 pub mod url;
 pub mod url_search_params;
 
@@ -31,7 +29,12 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     // (`throw_dom_exception`, `AbortSignal`'s default abort reason) mint
     // instances through that cached ctor.
 
-    console::install(scope, global);
+    // `console` is installed by the JS module
+    // `ext:limun/01_console.js` during bootstrap (a namespace object,
+    // non-enumerable global — Web IDL §3.7.5). The JS layer owns the
+    // WHATWG Console Standard surface (formatting, group indentation,
+    // table, timer/count state); the flat Rust op `op_print` (registered
+    // in `core::ops`) is the irreducible stdout/stderr write.
 
     // User-prompt globals (alert/confirm/prompt) — ordinary interface
     // attributes, enumerable per Web IDL §3.7.3 (same bucket as `self`).
@@ -39,12 +42,13 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     set_fn(scope, global, "confirm", prompt::confirm);
     set_fn(scope, global, "prompt", prompt::prompt);
 
-    // Timers (WHATWG HTML) — ordinary interface attributes, enumerable.
-    set_fn(scope, global, "setTimeout", timers::set_timeout);
-    set_fn(scope, global, "setInterval", timers::set_interval);
-    set_fn(scope, global, "clearTimeout", timers::clear_timeout);
-    set_fn(scope, global, "clearInterval", timers::clear_interval);
-    set_fn(scope, global, "queueMicrotask", timers::queue_microtask);
+    // Timers (WHATWG HTML) — installed by the JS module
+    // `ext:limun/02_timers.js` during bootstrap (plain operations,
+    // enumerable). The JS layer owns the spec surface (the `this`
+    // check, WebIDL `long` coercion of the timeout, string-callback
+    // indirect eval, extra-args handling, numeric ID exposure); the
+    // flat Rust ops (`op_timer_schedule`, `op_timer_clear`,
+    // `op_queue_microtask`) live in `core::ops`.
 
     // `self`: realm-agnostic self-reference (WHATWG HTML, shared with Worker
     // scope). Same object as `globalThis` — not a subclass, not a wrapper.

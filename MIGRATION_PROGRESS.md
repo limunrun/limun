@@ -47,7 +47,8 @@ progress across subagents and context compactions.
 
 - [x] dom_exception (JS port + Rust bridge for new_instance)
 - [x] text_encoding (JS port + 6 ops, bug #2 fixed)
-- [ ] console/* (JS port)
+- [x] console (JS port, 1 op: op_print)
+- [x] timers (JS port, 3 ops: op_timer_schedule/clear/queue_microtask)
 - [ ] event (Event/EventTarget/AbortController/AbortSignal)
 - [ ] performance (HR Time)
 - [ ] text_encoding (TextEncoder/TextDecoder)
