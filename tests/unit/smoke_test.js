@@ -29,7 +29,7 @@ console.group("globalThis shape (Web IDL enumerability)");
   // non-enumerable — verified against real Node
   // (`Object.getOwnPropertyDescriptor(globalThis, "URL").enumerable ===
   // false`, same as `Array`/`Object`).
-  for (const name of ["console", "Limun", "TextEncoder", "TextDecoder", "URL", "URLSearchParams", "Headers", "Response", "Request", "ReadableStream", "ReadableStreamReader", "Blob", "FormData", "Event", "CustomEvent", "EventTarget", "AbortController", "AbortSignal"]) {
+  for (const name of ["console", "Limun", "TextEncoder", "TextDecoder", "URL", "URLSearchParams", "Headers", "Response", "Request", "ReadableStream", "ReadableStreamDefaultReader", "Blob", "FormData", "Event", "CustomEvent", "EventTarget", "AbortController", "AbortSignal"]) {
     check(`${name} is own property`, Object.getOwnPropertyNames(globalThis).includes(name));
     check(`${name} is non-enumerable`, desc(globalThis, name) === false);
     check(`${name} NOT in Object.keys`, !Object.keys(globalThis).includes(name));
@@ -843,7 +843,7 @@ console.group("EventTarget / AbortController / AbortSignal (DOM Standard §4, ab
 console.groupEnd();
 
 // ---------------------------------------------------------------------
-console.group("ReadableStream / ReadableStreamReader (WHATWG Streams Standard)");
+console.group("ReadableStream / ReadableStreamDefaultReader (WHATWG Streams Standard)");
 // ---------------------------------------------------------------------
 {
   // Construct from JS with a `start(controller)` push source — the only
@@ -860,7 +860,7 @@ console.group("ReadableStream / ReadableStreamReader (WHATWG Streams Standard)")
 
   const reader = stream.getReader();
   check("ReadableStream is locked after getReader", stream.locked === true);
-  check("reader is a ReadableStreamReader", reader instanceof ReadableStreamReader);
+  check("reader is a ReadableStreamDefaultReader", reader instanceof ReadableStreamDefaultReader);
 
   const chunks = [];
   while (true) {

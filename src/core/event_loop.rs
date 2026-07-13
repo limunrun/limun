@@ -266,6 +266,15 @@ pub fn run(scope: &mut v8::PinScope) {
 }
 
 /// `TaskResult::Fetch` handler: settle the pending `PromiseResolver`.
+///
+/// On success, builds a *flat* plain `v8::Object` — own properties
+/// `status` (number), `statusText` (string), `headers` (an `Array` of
+/// `[name, value]` string pairs), `body` (`Uint8Array`), `url` (string,
+/// the final URL after redirects), `redirected` (bool) — and resolves
+/// the op's promise with it. `ext:limun/23_fetch.js`'s `fetch()`
+/// continuation constructs the actual `Response` from this; no Rust
+/// `Response` type exists anymore (the class is JS-defined, see
+/// `ext:limun/22_response.js`).
 fn resolve_fetch(scope: &mut v8::PinScope, task_id: u64, result: Result<FetchPayload, String>) {
     let Some(task) = PENDING_TASKS.with(|p| p.borrow_mut().remove(&task_id)) else {
         return;
@@ -273,18 +282,45 @@ fn resolve_fetch(scope: &mut v8::PinScope, task_id: u64, result: Result<FetchPay
     let resolver = v8::Local::new(scope, &task.resolver);
     match result {
         Ok(payload) => {
-            let instance = crate::web::fetch::response::new_instance(
-                scope,
-                payload.status,
-                payload.status_text,
-                payload.headers,
-                payload.body,
-                payload.original_url,
-                payload.final_url,
-                "basic",
-                true,
-            );
-            let _ = resolver.resolve(scope, instance.into());
+            let obj = v8::Object::new(scope);
+
+            let status_key = v8::String::new(scope, "status").unwrap();
+            let status_val = v8::Number::new(scope, payload.status as f64);
+            obj.set(scope, status_key.into(), status_val.into());
+
+            let status_text_key = v8::String::new(scope, "statusText").unwrap();
+            let status_text_val = v8::String::new(scope, &payload.status_text).unwrap();
+            obj.set(scope, status_text_key.into(), status_text_val.into());
+
+            let headers_key = v8::String::new(scope, "headers").unwrap();
+            let pairs: Vec<v8::Local<v8::Value>> = payload
+                .headers
+                .iter()
+                .map(|(k, v)| {
+                    let k_str = v8::String::new(scope, k).unwrap();
+                    let v_str = v8::String::new(scope, v).unwrap();
+                    v8::Array::new_with_elements(scope, &[k_str.into(), v_str.into()]).into()
+                })
+                .collect();
+            let headers_arr = v8::Array::new_with_elements(scope, &pairs);
+            obj.set(scope, headers_key.into(), headers_arr.into());
+
+            let body_key = v8::String::new(scope, "body").unwrap();
+            let len = payload.body.len();
+            let store = v8::ArrayBuffer::new_backing_store_from_vec(payload.body).make_shared();
+            let ab = v8::ArrayBuffer::with_backing_store(scope, &store);
+            let view = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
+            obj.set(scope, body_key.into(), view.into());
+
+            let url_key = v8::String::new(scope, "url").unwrap();
+            let url_val = v8::String::new(scope, &payload.final_url).unwrap();
+            obj.set(scope, url_key.into(), url_val.into());
+
+            let redirected_key = v8::String::new(scope, "redirected").unwrap();
+            let redirected = payload.original_url != payload.final_url;
+            obj.set(scope, redirected_key.into(), v8::Boolean::new(scope, redirected).into());
+
+            let _ = resolver.resolve(scope, obj.into());
         }
         Err(message) => {
             let msg = v8::String::new(scope, &format!("fetch failed: {message}")).unwrap();

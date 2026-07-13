@@ -42,15 +42,22 @@ thread_local! {
     pub static IMPORT_MAP: RefCell<Option<ImportMap>> = RefCell::new(None);
 
     /// `v8::Weak` handles holding guaranteed GC finalizers for native state
-    /// boxed by `web::native::store` (URL/URLSearchParams/Headers/Response/
-    /// Request/Blob/FormData/streams/events/TextDecoder/…). Each `Weak` must
-    /// outlive the JS object it tracks — dropping it earlier cancels the
-    /// finalizer. During normal running, GC collecting an object runs its
-    /// finalizer and frees the box. At teardown, `clear_module_state` drops
-    /// this vec while the isolate is alive: any object *still* live has its
+    /// boxed on a JS object's internal field. Each `Weak` must outlive the
+    /// JS object it tracks — dropping it earlier cancels the finalizer.
+    /// During normal running, GC collecting an object runs its finalizer
+    /// and frees the box. At teardown, `clear_module_state` drops this vec
+    /// while the isolate is alive: any object *still* live has its
     /// finalizer cancelled (not run), so its box leaks once — harmless, the
     /// process is exiting and the OS reclaims it. Objects collected earlier
     /// were already freed.
+    ///
+    /// Currently unused: every web module that used to box native state
+    /// this way (URL/URLSearchParams/Headers/Response/Request/Blob/
+    /// FormData/streams/events/TextDecoder/…) has been migrated to
+    /// JS-on-ops (see MIGRATION_PROGRESS.md) — their state now lives in JS
+    /// private fields, not Rust-boxed internal fields. Kept as
+    /// infrastructure for any future native class that needs it (e.g. a
+    /// resource handle with a GC-driven native finalizer).
     pub static WEAK_HANDLES: RefCell<Vec<v8::Weak<v8::Value>>> = RefCell::new(Vec::new());
 
     /// task id -> pending fetch/import() task. Drained by the event loop

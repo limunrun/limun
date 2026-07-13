@@ -119,6 +119,22 @@
     return V;
   }
 
+  // Limun-specific simplification (documented, not spec): every stream
+  // Limun actually constructs is a byte stream (`Response.body`,
+  // `Request.body`, `Blob.stream()`), so — matching the previous Rust
+  // implementation's contract ("Chunks are byte slices... string on
+  // enqueue; yielded back as Uint8Array") — a plain string chunk passed
+  // to `enqueue()` is coerced to its UTF-8 bytes as a `Uint8Array`.
+  // `ArrayBufferView`/`ArrayBuffer` chunks pass through unchanged (already
+  // bytes); anything else passes through as-is (kept generic per spec —
+  // only the string case gets Limun's byte-stream convenience).
+  function coerceChunk(chunk) {
+    if (typeof chunk === "string") {
+      return new TextEncoder().encode(chunk);
+    }
+    return chunk;
+  }
+
   // --- Private fields (Symbols, not #private — matches Deno) -------------
 
   // Stream slots.
@@ -724,7 +740,7 @@
       if (readableStreamDefaultControllerCanCloseOrEnqueue(this) === false) {
         throw new TypeError("The stream controller cannot close or enqueue");
       }
-      readableStreamDefaultControllerEnqueue(this, chunk);
+      readableStreamDefaultControllerEnqueue(this, coerceChunk(chunk));
     }
 
     error(e = undefined) {

@@ -5,13 +5,9 @@
 //! WHATWG HTML `Window` interface, adapted to a terminal (Deno model). No
 //! `window` itself: there is no browsing context here to name.
 
-pub mod blob;
 pub mod dom_exception;
 pub mod fetch;
-pub mod form_data;
-mod native;
 pub mod performance;
-pub mod streams;
 
 /// Install all web-standard globals onto `context`'s global object.
 pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
@@ -86,33 +82,32 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     // `op_url_stringify_search_params`) in `core::ops` do the irreducible
     // native work (the `url` crate's parser).
 
-    // Fetch Standard — `fetch` itself is a plain operation (enumerable);
-    // `Headers`/`Response` are constructible classes (non-enumerable).
-    fetch::install(scope, global);
-
+    // Fetch Standard — `fetch`/`Headers`/`Request`/`Response` are
+    // installed by the JS modules `ext:limun/20_headers.js` through
+    // `ext:limun/23_fetch.js` during bootstrap. The JS layers own the
+    // entire spec surface (class shapes, getters, body mixin, header
+    // normalization, redirect handling); the only Rust-side piece is
+    // `fetch::op_fetch` (registered in `core::ops`), the irreducible
+    // native HTTP transport (reqwest + tokio + the bridge channel).
+    //
     // Streams Standard — `ReadableStream`/`ReadableStreamDefaultReader`/
     // `ReadableStreamDefaultController` (interface objects,
     // non-enumerable). Installed by the JS module `ext:limun/06_streams.js`
     // during bootstrap (real constructible classes). The JS layer owns
     // the spec surface (stream state machine, queue, read requests,
-    // lock, cancel, async iteration); the Rust side
-    // (`web::streams::new_fixed_stream`) is only a thin bridge so
-    // `Response.body` / `Request.body` / `Blob.stream()` can mint fixed
-    // (fully-buffered) streams by calling the cached JS factory
-    // (`createFixedReadableStream`) — same pattern as `DOMException`'s
-    // `new_instance`.
+    // lock, cancel, async iteration) entirely — including minting fixed
+    // (fully-buffered) streams for `Response.body` / `Request.body` /
+    // `Blob.stream()` via its own `createFixedReadableStream` factory
+    // (no Rust bridge needed now that Response/Request are JS too).
     //
     // File API + XHR Standard — `Blob`/`File`/`FormData` (interface
     // objects, non-enumerable). Installed by the JS modules
     // `ext:limun/09_blob.js` / `ext:limun/10_form_data.js` during
     // bootstrap (real constructible classes). The JS layers own the
-    // spec surface (Blob/File/FormData classes, brand checks,
-    // BlobPart/entry conversion, slice/text/arrayBuffer/stream, multipart
-    // + urlencoded parsing); the Rust side (`web::blob::new_blob_instance`
-    // / `web::form_data::new_instance`) is only a thin bridge so
-    // `Response.blob()` / `Request.blob()` / `Response.formData()` /
-    // `Request.formData()` can mint instances by calling the cached JS
-    // factories (`createBlob`/`createFormData`).
+    // entire spec surface; `Response.blob()` / `Request.blob()` /
+    // `Response.formData()` / `Request.formData()` (`19_body.js`) call
+    // their constructors/factories directly — no Rust bridge needed now
+    // that Response/Request are JS too.
 
     // DOM Standard — `Event`/`CustomEvent`/`EventTarget`/
     // `AbortController`/`AbortSignal` (interface objects, non-enumerable).
@@ -147,12 +142,18 @@ pub fn set_global(
     target.define_own_property(scope, key.into(), value, v8::PropertyAttribute::DONT_ENUM);
 }
 
+/// Currently unused — the previous callers (`Headers`/`Request`/
+/// `Response`'s Rust classes) migrated to JS, where `TypeError`/
+/// `RangeError` are thrown directly. Retained for the next Rust caller
+/// that needs one.
+#[allow(dead_code)]
 pub fn throw_type_error(scope: &mut v8::PinScope, message: &str) {
     let message = v8::String::new(scope, message).unwrap();
     let exception = v8::Exception::type_error(scope, message);
     scope.throw_exception(exception);
 }
 
+#[allow(dead_code)]
 pub fn throw_range_error(scope: &mut v8::PinScope, message: &str) {
     let message = v8::String::new(scope, message).unwrap();
     let exception = v8::Exception::range_error(scope, message);

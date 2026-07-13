@@ -61,6 +61,12 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     set_fn(scope, ops, "op_abort_signal_get_reason", op_abort_signal_get_reason);
     set_fn(scope, ops, "op_abort_signal_add_listener", op_abort_signal_add_listener);
 
+    // Fetch Standard — the async HTTP transport (reqwest + tokio + the
+    // bridge channel). The spec surface lives entirely in JS
+    // (`ext:limun/20_headers.js` through `ext:limun/23_fetch.js`); see
+    // `web::fetch::op_fetch`'s doc comment.
+    set_fn(scope, ops, "op_fetch", crate::web::fetch::op_fetch);
+
     // URL Standard ops — parse/reparse/serialize + search-params helpers.
     // The spec surface (the `URL`/`URLSearchParams` classes, getters,
     // setters, live linkage, WebIDL argument validation) lives in the JS

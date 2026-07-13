@@ -1,55 +1,54 @@
-//! `fetch()` — WHATWG Fetch Standard
-//! (https://fetch.spec.whatwg.org/#fetch-method). Async: spawns a tokio
-//! task on the process-global runtime and returns a pending Promise; the
-//! result arrives over the bridge channel and is resolved by
+//! `op_fetch` — the async transport backing WHATWG Fetch Standard
+//! (https://fetch.spec.whatwg.org/#fetch-method) `fetch()`. Async: spawns
+//! a tokio task on the process-global runtime and returns a pending
+//! Promise; the result arrives over the bridge channel and is resolved by
 //! `core::event_loop::resolve_fetch`. Two concurrent `fetch()` calls run
 //! concurrently (multi-thread tokio runtime).
 //!
-//! Permission check still happens inline on the V8 thread (synchronous
-//! failure → immediate rejection, no task spawned).
+//! The spec surface — parsing `input`/`init` into a flat
+//! method/url/headers/body/signal, building the `Response` from the
+//! result — lives entirely in JS (`ext:limun/20_headers.js` through
+//! `ext:limun/23_fetch.js`). This module is only the irreducible native
+//! work: the HTTP transport (reqwest + tokio) and its bridge-channel/
+//! abort-cancellation wiring. `op_fetch` is registered under that name in
+//! `core::ops::install`.
 //!
-//! `AbortSignal` support: if `init.signal` (or a `Request`'s signal) is
-//! already aborted, the promise rejects inline with the signal's reason.
-//! Otherwise a native `"abort"` listener is registered on the signal; if
-//! the signal aborts while the tokio task is in flight, the listener
-//! removes the pending task (so the late tokio result is a no-op),
-//! rejects the promise with the reason, and cancels the tokio task via a
-//! `CancellationToken` (`tokio::select!` between `req.send()` and
-//! `cancel.cancelled()`).
+//! Permission check happens inline on the V8 thread (synchronous failure
+//! → immediate rejection, no task spawned).
 //!
-//! Simplifications vs. spec:
-//!   - `Request` input is supported (Item 2). `input` may be a `Request`
-//!     instance or a string.
-//!   - `fetch()` only rejects on a genuine network failure or abort,
-//!     never on a non-2xx HTTP status (that's `.ok === false`, per spec).
-
-pub mod headers;
-pub mod request;
-pub mod response;
+//! `AbortSignal` support: if the `signal` argument is already aborted,
+//! the promise rejects inline with the signal's reason. Otherwise a
+//! native `"abort"` listener is registered on the signal (via the
+//! `core::ops` AbortSignal bridges); if the signal aborts while the
+//! tokio task is in flight, the listener removes the pending task (so
+//! the late tokio result is a no-op), rejects the promise with the
+//! reason, and cancels the tokio task via a `CancellationToken`
+//! (`tokio::select!` between `req.send()` and `cancel.cancelled()`).
+//!
+//! On success, resolves the promise with a *flat* plain object — `{
+//! status, statusText, headers, body, url, redirected }` — not a
+//! `Response` instance; `ext:limun/23_fetch.js`'s `fetch()` builds the
+//! actual `Response` from that. See `core::event_loop::resolve_fetch`.
 
 use crate::core::bridge::{FetchPayload, TaskResult};
 use crate::core::ops;
 use crate::core::permissions;
 use crate::core::runtime;
 use crate::core::state::{PENDING_TASKS, PendingKind, PendingTask, next_task_id};
-use crate::web::native;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 use tokio_util::sync::CancellationToken;
 
-pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
-    headers::install(scope, global);
-    response::install(scope, global);
-    request::install(scope, global);
-
-    let key = v8::String::new(scope, "fetch").unwrap();
-    let func = v8::Function::new(scope, fetch).unwrap();
-    global.set(scope, key.into(), func.into());
-}
-
-fn fetch(
+/// `op_fetch(method: String, url: String, headerPairs: Array<[String,
+/// String]>, body: Uint8Array|null|undefined, signal: object|undefined)
+/// -> Promise` — registered as `__limunOps.op_fetch` by `core::ops`.
+/// Every argument here is already a spec-flat value; the JS layer
+/// (`23_fetch.js`) has already resolved `input`/`init` (a `Request`
+/// instance or a string, method normalization, header parsing, body
+/// coercion, signal precedence) down to these five plain values.
+pub fn op_fetch(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue<v8::Value>,
@@ -58,35 +57,28 @@ fn fetch(
     let promise = resolver.get_promise(scope);
     rv.set(promise.into());
 
-    if args.length() == 0 {
-        reject_type_error(scope, resolver, "fetch: 1 argument required, but only 0 present");
-        return;
-    }
+    let method = args.get(0).to_rust_string_lossy(scope);
+    let url_str = args.get(1).to_rust_string_lossy(scope);
 
-    // Resolve `input`: a `Request` instance (clone its fields as the
-    // base) or a string (the URL). `init` overrides the base.
-    let mut method = String::from("GET");
-    let mut url_str = String::new();
-    let mut header_pairs = Vec::new();
-    let mut body: Option<Vec<u8>> = None;
-    let mut signal_obj: Option<v8::Local<v8::Object>> = None;
+    let header_pairs = read_header_pairs(scope, args.get(2));
 
-    let input = args.get(0);
-    if let Ok(input_obj) = <v8::Local<v8::Object>>::try_from(input) {
-        if request::is_request_instance(scope, input_obj) {
-            let state = request::state(scope, input_obj);
-            method = state.method.clone();
-            url_str = state.url.clone();
-            header_pairs = state.header_pairs.borrow().clone();
-            body = state.body.borrow().clone();
-            if let Some(g) = &state.signal {
-                signal_obj = Some(v8::Local::new(scope, g));
-            }
+    let body: Option<Vec<u8>> = {
+        let v = args.get(3);
+        if v.is_null_or_undefined() {
+            None
+        } else {
+            read_buffer_source(v)
         }
-    }
-    if url_str.is_empty() {
-        url_str = input.to_rust_string_lossy(scope);
-    }
+    };
+
+    let signal_obj: Option<v8::Local<v8::Object>> = {
+        let v = args.get(4);
+        if v.is_null_or_undefined() {
+            None
+        } else {
+            <v8::Local<v8::Object>>::try_from(v).ok()
+        }
+    };
 
     let url = match url::Url::parse(&url_str) {
         Ok(u) => u,
@@ -95,42 +87,6 @@ fn fetch(
             return;
         }
     };
-
-    // `init` overrides (and may supply a `signal`, which wins over any
-    // `Request`-inherited signal per spec).
-    if args.length() > 1 {
-        if let Ok(init) = <v8::Local<v8::Object>>::try_from(args.get(1)) {
-            let method_key = v8::String::new(scope, "method").unwrap();
-            if let Some(v) = init.get(scope, method_key.into()) {
-                if !v.is_undefined() {
-                    method = v.to_rust_string_lossy(scope).to_uppercase();
-                }
-            }
-            let headers_key = v8::String::new(scope, "headers").unwrap();
-            if let Some(v) = init.get(scope, headers_key.into()) {
-                if !v.is_undefined() {
-                    header_pairs = headers::parse_value(scope, v);
-                }
-            }
-            let body_key = v8::String::new(scope, "body").unwrap();
-            if let Some(v) = init.get(scope, body_key.into()) {
-                if !v.is_undefined() && !v.is_null() {
-                    body = Some(
-                        native::read_buffer_source(v)
-                            .unwrap_or_else(|| v.to_rust_string_lossy(scope).into_bytes()),
-                    );
-                }
-            }
-            let signal_key = v8::String::new(scope, "signal").unwrap();
-            if let Some(v) = init.get(scope, signal_key.into()) {
-                if v.is_null_or_undefined() {
-                    signal_obj = None;
-                } else if let Ok(obj) = <v8::Local<v8::Object>>::try_from(v) {
-                    signal_obj = Some(obj);
-                }
-            }
-        }
-    }
 
     // AbortSignal: pre-aborted → reject inline with the signal's reason, no spawn.
     if let Some(sig) = signal_obj {
@@ -143,10 +99,7 @@ fn fetch(
     }
 
     // Permission gate is synchronous: a denied URL rejects inline rather
-    // than spawning a task that would always reject. Sits after the
-    // `init` overrides because the *final* method decides the mode —
-    // safe methods only need a `read` grant, state-changing ones need
-    // `write`.
+    // than spawning a task that would always reject.
     let mode = match method.as_str() {
         "GET" | "HEAD" | "OPTIONS" => permissions::Mode::Read,
         _ => permissions::Mode::Write,
@@ -195,6 +148,45 @@ fn fetch(
         });
         let _ = runtime::tx().send(TaskResult::Fetch { task_id, result: payload });
     });
+}
+
+/// Read a `v8::Array` of `[name, value]` string pairs (the shape
+/// `20_headers.js`'s `getHeaderList`/`parseHeadersInit` produce) into a
+/// `Vec<(String, String)>`. Not an array (or missing/malformed entries)
+/// degrades gracefully — a JS-layer bug, not a user error, so this never
+/// throws.
+fn read_header_pairs(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Vec<(String, String)> {
+    let Ok(array) = <v8::Local<v8::Array>>::try_from(value) else {
+        return Vec::new();
+    };
+    let mut pairs = Vec::with_capacity(array.length() as usize);
+    for i in 0..array.length() {
+        let Some(entry) = array.get_index(scope, i) else { continue };
+        let Ok(pair) = <v8::Local<v8::Array>>::try_from(entry) else { continue };
+        let k = pair.get_index(scope, 0).map(|v| v.to_rust_string_lossy(scope)).unwrap_or_default();
+        let v = pair.get_index(scope, 1).map(|v| v.to_rust_string_lossy(scope)).unwrap_or_default();
+        pairs.push((k, v));
+    }
+    pairs
+}
+
+/// Read raw bytes out of a JS value that's an `ArrayBufferView`
+/// (`Uint8Array`, etc.) or a plain `ArrayBuffer` (a `BufferSource` per
+/// Web IDL). Returns `None` for anything else — `23_fetch.js`'s
+/// `coerceBodyInit` always hands over a `Uint8Array`, so `None` here
+/// means the JS layer passed something unexpected, not a user error.
+fn read_buffer_source(value: v8::Local<v8::Value>) -> Option<Vec<u8>> {
+    if let Ok(view) = <v8::Local<v8::ArrayBufferView>>::try_from(value) {
+        let mut bytes = vec![0u8; view.byte_length()];
+        view.copy_contents(&mut bytes);
+        return Some(bytes);
+    }
+    if let Ok(ab) = <v8::Local<v8::ArrayBuffer>>::try_from(value) {
+        let len = ab.byte_length();
+        let data = ab.data()?;
+        return Some(unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, len) }.to_vec());
+    }
+    None
 }
 
 /// Plain-Rust async fetch — runs on a tokio worker thread. `Send` only,
@@ -255,11 +247,8 @@ async fn do_fetch(
 // =========================================================================
 
 thread_local! {
-    /// Id counter + data table for the fetch-abort trampoline. Fresh
-    /// counter (disjoint from any event-module trampoline — the event
-    /// module is now JS, so there's no longer a Rust counter there to
-    /// collide with) so ids never collide. Entries are one-shot —
-    /// removed on first fire.
+    /// Id counter + data table for the fetch-abort trampoline. Entries
+    /// are one-shot — removed on first fire.
     static NEXT_FETCH_ABORT_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static FETCH_ABORTS: RefCell<HashMap<usize, FetchAbortData>> = RefCell::new(HashMap::new());
 }
