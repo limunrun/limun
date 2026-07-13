@@ -54,6 +54,7 @@
 
 ((globalThis) => {
   const { primordials } = globalThis.__bootstrap;
+  const webidl = globalThis.__bootstrap.webidl;
   const {
     op_prompt_alert,
     op_prompt_confirm,
@@ -62,7 +63,6 @@
   } = globalThis.__limunOps;
   const {
     String,
-    TypeError,
   } = primordials;
 
   // Cache the TTY check once — the answer is stable for the process
@@ -78,7 +78,7 @@
   // The op writes `message + " [Enter] "` to stderr and blocks for one
   // line of stdin.
   function alert(message = "") {
-    message = convertDOMString(message);
+    message = webidl.converters.DOMString(message);
     if (!isTty) {
       return;
     }
@@ -91,7 +91,7 @@
   // writes `message + " [y/N] "` to stderr, reads one line, returns true
   // only if the trimmed answer is exactly `y` or `Y`.
   function confirm(message = "") {
-    message = convertDOMString(message);
+    message = webidl.converters.DOMString(message);
     if (!isTty) {
       return false;
     }
@@ -106,25 +106,13 @@
   // line. Empty input + `defaultValue` given → returns `defaultValue`;
   // otherwise returns the trimmed input; EOF → null.
   function prompt(message = "", defaultValue = "") {
-    message = convertDOMString(message);
-    defaultValue = convertDOMString(defaultValue);
+    message = webidl.converters.DOMString(message);
+    defaultValue = webidl.converters.DOMString(defaultValue);
     if (!isTty) {
       return null;
     }
     const formattedMessage = `${message} `;
     return op_prompt_prompt(formattedMessage, defaultValue);
-  }
-
-  // `webidl.converters.DOMString(V)` — same inline as base64/02_timers.
-  // Strings pass through; symbols throw; everything else → `String(V)`.
-  function convertDOMString(V) {
-    if (typeof V === "string") {
-      return V;
-    }
-    if (typeof V === "symbol") {
-      throw new TypeError("Cannot convert a Symbol value to a string");
-    }
-    return String(V);
   }
 
   // Install as enumerable globals (matches previous Rust `set_fn` —

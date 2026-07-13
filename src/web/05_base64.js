@@ -27,11 +27,12 @@
 //   - `core.loadExtScript("ext:deno_web/01_dom_exception.js")` →
 //     `globalThis.DOMException` (still in Rust until the DOMException
 //     migration).
-//   - `webidl.requiredArguments` / `webidl.converters.DOMString` → inline
-//     equivalents (no full WebIDL module yet — this is the pilot).
+//   - `webidl.requiredArguments` / `webidl.converters.DOMString` →
+//     `globalThis.__bootstrap.webidl` (shared `ext:limun/00_webidl.js`).
 
 ((globalThis) => {
   const { primordials } = globalThis.__bootstrap;
+  const webidl = globalThis.__bootstrap.webidl;
   const { op_base64_atob, op_base64_btoa } = globalThis.__limunOps;
   const {
     ObjectPrototypeIsPrototypeOf,
@@ -43,35 +44,6 @@
   } = primordials;
 
   const { DOMException } = globalThis;
-
-  // --- Inline WebIDL (minimal, pilot-scoped) -----------------------------
-
-  // `webidl.requiredArguments(length, required, prefix)` — throw a
-  // TypeError if fewer than `required` arguments were passed. Matches
-  // Deno's `00_webidl.js` message shape: `${prefix}: ${required} argument(s)
-  // required, but only ${length} present`.
-  function requiredArguments(length, required, prefix) {
-    if (length < required) {
-      const errMsg = `${prefix}: ${required} argument${
-        required === 1 ? "" : "s"
-      } required, but only ${length} present`;
-      throw new TypeError(errMsg);
-    }
-  }
-
-  // `webidl.converters.DOMString(V, prefix, context)` — Web IDL DOMString
-  // conversion. Strings pass through; symbols throw (V8's `String(sym)`
-  // would return the description, which is non-conformant); everything
-  // else goes through `String(V)`. Matches Deno's converter exactly.
-  function convertDOMString(V) {
-    if (typeof V === "string") {
-      return V;
-    }
-    if (typeof V === "symbol") {
-      throw new TypeError("Cannot convert a Symbol value to a string");
-    }
-    return String(V);
-  }
 
   // --- ASCII whitespace stripping + forgiving-base64 validation --------
   //
@@ -124,8 +96,8 @@
 
   function atob(data) {
     const prefix = "Failed to execute 'atob'";
-    requiredArguments(arguments.length, 1, prefix);
-    data = convertDOMString(data);
+    webidl.requiredArguments(arguments.length, 1, prefix);
+    data = webidl.converters.DOMString(data);
     const normalized = normalizeForAtob(data);
     if (normalized === null) {
       throw new DOMException(
@@ -151,8 +123,8 @@
 
   function btoa(data) {
     const prefix = "Failed to execute 'btoa'";
-    requiredArguments(arguments.length, 1, prefix);
-    data = convertDOMString(data);
+    webidl.requiredArguments(arguments.length, 1, prefix);
+    data = webidl.converters.DOMString(data);
     try {
       return op_base64_btoa(data);
     } catch (e) {

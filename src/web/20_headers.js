@@ -25,7 +25,9 @@
 // existing Rust behavior rather than full spec strictness:
 //   - `__bootstrap` / `core.ops`   → not used (pure JS, no op).
 //   - `webidl.brand` /
-//     `webidl.assertBranded`      → inline equivalents (`09_blob.js` pattern).
+//     `webidl.assertBranded` /
+//     `webidl.requiredArguments` → `globalThis.__bootstrap.webidl`
+//     (shared `ext:limun/00_webidl.js`).
 //   - `webidl.converters.*`        → dropped; plain `String()` coercion.
 //   - `webidl.mixinPairIterable`   → inline iterator wiring, `10_form_data.js`-style
 //     (a snapshot array's own `[Symbol.iterator]()` — correct `{value,
@@ -40,6 +42,7 @@
 
 ((globalThis) => {
   const { primordials } = globalThis.__bootstrap;
+  const webidl = globalThis.__bootstrap.webidl;
   const {
     ArrayIsArray,
     ArrayPrototypeIncludes,
@@ -56,28 +59,6 @@
     ObjectDefineProperty,
     TypeError,
   } = primordials;
-
-  // --- Inline WebIDL (minimal, pilot-scoped) -----------------------------
-
-  const brand = Symbol("[[webidl.brand]]");
-
-  function assertBranded(self, prototype) {
-    if (
-      !ObjectPrototypeIsPrototypeOf(prototype, self) || self[brand] !== brand
-    ) {
-      throw new TypeError("Illegal invocation");
-    }
-  }
-
-  function requiredArguments(length, required, prefix) {
-    if (length < required) {
-      throw new TypeError(
-        `${prefix}: ${required} argument${
-          required === 1 ? "" : "s"
-        } required, but only ${length} present`,
-      );
-    }
-  }
 
   // --- Private fields ------------------------------------------------------
 
@@ -181,23 +162,23 @@
 
     /** @param {HeadersInit} [init] */
     constructor(init = undefined) {
-      this[brand] = brand;
+      this[webidl.brand] = webidl.brand;
       this[_list] = parseHeadersInit(init);
     }
 
     append(name, value) {
-      assertBranded(this, HeadersPrototype);
+      webidl.assertBranded(this, HeadersPrototype, "Headers");
       const prefix = "Failed to execute 'append' on 'Headers'";
-      requiredArguments(arguments.length, 2, prefix);
+      webidl.requiredArguments(arguments.length, 2, prefix);
       name = StringPrototypeToLowerCase(String(name));
       value = String(value);
       ArrayPrototypePush(this[_list], [name, value]);
     }
 
     delete(name) {
-      assertBranded(this, HeadersPrototype);
+      webidl.assertBranded(this, HeadersPrototype, "Headers");
       const prefix = "Failed to execute 'delete' on 'Headers'";
-      requiredArguments(arguments.length, 1, prefix);
+      webidl.requiredArguments(arguments.length, 1, prefix);
       name = StringPrototypeToLowerCase(String(name));
       const list = this[_list];
       let w = 0;
@@ -210,9 +191,9 @@
     /** `get(name)` — the *combined* value: every entry with this name,
      * in insertion order, joined with `", "`. `null` if there are none. */
     get(name) {
-      assertBranded(this, HeadersPrototype);
+      webidl.assertBranded(this, HeadersPrototype, "Headers");
       const prefix = "Failed to execute 'get' on 'Headers'";
-      requiredArguments(arguments.length, 1, prefix);
+      webidl.requiredArguments(arguments.length, 1, prefix);
       name = StringPrototypeToLowerCase(String(name));
       const list = this[_list];
       let combined = null;
@@ -229,7 +210,7 @@
     /** `getSetCookie()` — every `set-cookie` value, in insertion
      * order, as an array. The one header that must never be combined. */
     getSetCookie() {
-      assertBranded(this, HeadersPrototype);
+      webidl.assertBranded(this, HeadersPrototype, "Headers");
       const list = this[_list];
       const out = [];
       for (let i = 0; i < list.length; i++) {
@@ -239,9 +220,9 @@
     }
 
     has(name) {
-      assertBranded(this, HeadersPrototype);
+      webidl.assertBranded(this, HeadersPrototype, "Headers");
       const prefix = "Failed to execute 'has' on 'Headers'";
-      requiredArguments(arguments.length, 1, prefix);
+      webidl.requiredArguments(arguments.length, 1, prefix);
       name = StringPrototypeToLowerCase(String(name));
       const list = this[_list];
       for (let i = 0; i < list.length; i++) {
@@ -251,9 +232,9 @@
     }
 
     set(name, value) {
-      assertBranded(this, HeadersPrototype);
+      webidl.assertBranded(this, HeadersPrototype, "Headers");
       const prefix = "Failed to execute 'set' on 'Headers'";
-      requiredArguments(arguments.length, 2, prefix);
+      webidl.requiredArguments(arguments.length, 2, prefix);
       name = StringPrototypeToLowerCase(String(name));
       value = String(value);
       const list = this[_list];
@@ -277,9 +258,9 @@
     }
 
     forEach(callback, thisArg) {
-      assertBranded(this, HeadersPrototype);
+      webidl.assertBranded(this, HeadersPrototype, "Headers");
       const prefix = "Failed to execute 'forEach' on 'Headers'";
-      requiredArguments(arguments.length, 1, prefix);
+      webidl.requiredArguments(arguments.length, 1, prefix);
       if (typeof callback !== "function") {
         throw new TypeError(`${prefix}: callback must be a function`);
       }
@@ -290,17 +271,17 @@
     }
 
     entries() {
-      assertBranded(this, HeadersPrototype);
+      webidl.assertBranded(this, HeadersPrototype, "Headers");
       return pairIterator(this[_list], "entries");
     }
 
     keys() {
-      assertBranded(this, HeadersPrototype);
+      webidl.assertBranded(this, HeadersPrototype, "Headers");
       return pairIterator(this[_list], "keys");
     }
 
     values() {
-      assertBranded(this, HeadersPrototype);
+      webidl.assertBranded(this, HeadersPrototype, "Headers");
       return pairIterator(this[_list], "values");
     }
   }

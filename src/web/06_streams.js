@@ -25,11 +25,10 @@
 //   - `__bootstrap`            → `globalThis.__bootstrap`
 //   - `core.ops`               → `globalThis.__limunOps` (unused here — no op)
 //   - `webidl.brand` /
-//     `webidl.assertBranded`  → inline equivalents (same pattern as
-//     `01_dom_exception.js`).
-//   - `webidl.converters.*`    → inline converters (no full WebIDL module
-//     yet — same approach as base64/DOMException).
-//   - `webidl.requiredArguments` → inline `requiredArguments`.
+//     `webidl.assertBranded` /
+//     `webidl.requiredArguments` /
+//     `webidl.converters.object`/`any` → `globalThis.__bootstrap.webidl`
+//     (shared `ext:limun/00_webidl.js`).
 //   - `webidl.configureInterface` → dropped (only sets
 //     `[Symbol.toStringTag]`; Limun sets the tag inline).
 //   - `core.hostObjectBrand`   → dropped (no host-object branding in Limun).
@@ -64,6 +63,7 @@
 
 ((globalThis) => {
   const { primordials } = globalThis.__bootstrap;
+  const webidl = globalThis.__bootstrap.webidl;
   const {
     ArrayPrototypeShift,
     ObjectDefineProperty,
@@ -77,47 +77,6 @@
     SymbolAsyncIterator,
     TypeError,
   } = primordials;
-
-  // --- Inline WebIDL (minimal, pilot-scoped) ------------------------------
-
-  // `webidl.brand` — a Symbol used as a brand marker. Set on every
-  // stream/reader/controller instance in the constructor; checked by the
-  // getters/methods via `assertBranded` so a plain `{}` with a prototype
-  // welded on (or an object from a different class) fails the brand
-  // check and throws `TypeError: Illegal invocation`.
-  const brand = Symbol("[[webidl.brand]]");
-
-  // `webidl.assertBranded(self, prototype)` — throw `TypeError` if `self`
-  // isn't branded or isn't proto-chained to `prototype`.
-  function assertBranded(self, prototype) {
-    if (
-      !ObjectPrototypeIsPrototypeOf(prototype, self) || self[brand] !== brand
-    ) {
-      throw new TypeError("Illegal invocation");
-    }
-  }
-
-  // `webidl.requiredArguments(length, required, prefix)` — throw a
-  // `TypeError` if fewer than `required` arguments were passed.
-  function requiredArguments(length, required, prefix) {
-    if (length < required) {
-      throw new TypeError(`${prefix}: ${required} argument${required > 1 ? "s" : ""} required, but only ${length} present`);
-    }
-  }
-
-  // `webidl.converters.object(V, prefix, context)` — throw if not an
-  // object; otherwise return as-is.
-  function convertObject(V, prefix, context) {
-    if (typeof V !== "object" || V === null) {
-      throw new TypeError(`${prefix}: ${context} is not an object`);
-    }
-    return V;
-  }
-
-  // `webidl.converters.any(V)` — identity (no conversion).
-  function convertAny(V) {
-    return V;
-  }
 
   // Limun-specific simplification (documented, not spec): every stream
   // Limun actually constructs is a byte stream (`Response.body`,
@@ -368,7 +327,7 @@
     underlyingSource,
     underlyingSourceDict,
   ) {
-    const controller = new ReadableStreamDefaultController(brand);
+    const controller = new ReadableStreamDefaultController(webidl.brand);
     controller[_stream] = stream;
     controller[_queue] = [];
     controller[_closeRequested] = false;
@@ -478,17 +437,17 @@
     [_controller];
 
     constructor(underlyingSource = undefined, strategy = undefined) {
-      if (underlyingSource === brand) {
-        this[brand] = brand;
+      if (underlyingSource === webidl.brand) {
+        this[webidl.brand] = webidl.brand;
         return;
       }
       const prefix = "Failed to construct 'ReadableStream'";
       underlyingSource = underlyingSource !== undefined
-        ? convertObject(underlyingSource, prefix, "Argument 1")
+        ? webidl.converters.object(underlyingSource, prefix, "Argument 1")
         : null;
       // `strategy` is accepted but ignored (start-only: no
       // backpressure, no size algorithm, no highWaterMark).
-      this[brand] = brand;
+      this[webidl.brand] = webidl.brand;
       initializeReadableStream(this);
       this[_detached] = false;
       const underlyingSourceDict = underlyingSource !== null
@@ -508,15 +467,15 @@
     }
 
     get locked() {
-      assertBranded(this, ReadableStreamPrototype);
+      webidl.assertBranded(this, ReadableStreamPrototype, "ReadableStream");
       return isReadableStreamLocked(this);
     }
 
     cancel(reason = undefined) {
       try {
-        assertBranded(this, ReadableStreamPrototype);
+        webidl.assertBranded(this, ReadableStreamPrototype, "ReadableStream");
         if (reason !== undefined) {
-          reason = convertAny(reason);
+          reason = webidl.converters.any(reason);
         }
       } catch (err) {
         return PromiseReject(err);
@@ -530,10 +489,10 @@
     }
 
     getReader(options = undefined) {
-      assertBranded(this, ReadableStreamPrototype);
+      webidl.assertBranded(this, ReadableStreamPrototype, "ReadableStream");
       const prefix = "Failed to execute 'getReader' on 'ReadableStream'";
       if (options !== undefined) {
-        options = convertObject(options, prefix, "Argument 1");
+        options = webidl.converters.object(options, prefix, "Argument 1");
         if (options.mode !== undefined) {
           if (options.mode === "byob") {
             throw new TypeError(
@@ -547,10 +506,10 @@
     }
 
     values(options = undefined) {
-      assertBranded(this, ReadableStreamPrototype);
+      webidl.assertBranded(this, ReadableStreamPrototype, "ReadableStream");
       let preventCancel = false;
       if (options !== undefined) {
-        options = convertObject(
+        options = webidl.converters.object(
           options,
           "Failed to execute 'values' on 'ReadableStream'",
           "Argument 1",
@@ -576,7 +535,7 @@
   });
 
   function acquireReadableStreamDefaultReader(stream) {
-    const reader = new ReadableStreamDefaultReader(brand);
+    const reader = new ReadableStreamDefaultReader(webidl.brand);
     if (isReadableStreamLocked(stream)) {
       throw new TypeError("ReadableStream is locked");
     }
@@ -593,17 +552,17 @@
     [_readRequests];
 
     constructor(stream = undefined) {
-      if (stream === brand) {
-        this[brand] = brand;
+      if (stream === webidl.brand) {
+        this[webidl.brand] = webidl.brand;
         return;
       }
       const prefix = "Failed to construct 'ReadableStreamDefaultReader'";
-      requiredArguments(arguments.length, 1, prefix);
-      stream = convertObject(stream, prefix, "Argument 1");
+      webidl.requiredArguments(arguments.length, 1, prefix);
+      stream = webidl.converters.object(stream, prefix, "Argument 1");
       // Caller (acquireReadableStreamDefaultReader) handles the lock
       // transition; a direct `new ReadableStreamDefaultReader(stream)`
       // checks it here too, matching the spec.
-      this[brand] = brand;
+      this[webidl.brand] = webidl.brand;
       if (isReadableStreamLocked(stream)) {
         throw new TypeError("ReadableStream is locked");
       }
@@ -613,7 +572,7 @@
 
     get closed() {
       try {
-        assertBranded(this, ReadableStreamDefaultReaderPrototype);
+        webidl.assertBranded(this, ReadableStreamDefaultReaderPrototype, "ReadableStreamDefaultReader");
       } catch (err) {
         return PromiseReject(err);
       }
@@ -622,7 +581,7 @@
 
     read() {
       try {
-        assertBranded(this, ReadableStreamDefaultReaderPrototype);
+        webidl.assertBranded(this, ReadableStreamDefaultReaderPrototype, "ReadableStreamDefaultReader");
       } catch (err) {
         return PromiseReject(err);
       }
@@ -655,7 +614,7 @@
     }
 
     releaseLock() {
-      assertBranded(this, ReadableStreamDefaultReaderPrototype);
+      webidl.assertBranded(this, ReadableStreamDefaultReaderPrototype, "ReadableStreamDefaultReader");
       if (this[_stream] === undefined) {
         return;
       }
@@ -664,9 +623,9 @@
 
     cancel(reason = undefined) {
       try {
-        assertBranded(this, ReadableStreamDefaultReaderPrototype);
+        webidl.assertBranded(this, ReadableStreamDefaultReaderPrototype, "ReadableStreamDefaultReader");
         if (reason !== undefined) {
-          reason = convertAny(reason);
+          reason = webidl.converters.any(reason);
         }
       } catch (err) {
         return PromiseReject(err);
@@ -713,19 +672,19 @@
     [_underlyingSourceDict];
 
     constructor(brandArg = undefined) {
-      if (brandArg !== brand) {
+      if (brandArg !== webidl.brand) {
         throw new TypeError("Illegal constructor");
       }
-      this[brand] = brand;
+      this[webidl.brand] = webidl.brand;
     }
 
     get desiredSize() {
-      assertBranded(this, ReadableStreamDefaultControllerPrototype);
+      webidl.assertBranded(this, ReadableStreamDefaultControllerPrototype, "ReadableStreamDefaultController");
       return readableStreamDefaultControllerGetDesiredSize(this);
     }
 
     close() {
-      assertBranded(this, ReadableStreamDefaultControllerPrototype);
+      webidl.assertBranded(this, ReadableStreamDefaultControllerPrototype, "ReadableStreamDefaultController");
       if (readableStreamDefaultControllerCanCloseOrEnqueue(this) === false) {
         throw new TypeError("The stream controller cannot close or enqueue");
       }
@@ -733,9 +692,9 @@
     }
 
     enqueue(chunk = undefined) {
-      assertBranded(this, ReadableStreamDefaultControllerPrototype);
+      webidl.assertBranded(this, ReadableStreamDefaultControllerPrototype, "ReadableStreamDefaultController");
       if (chunk !== undefined) {
-        chunk = convertAny(chunk);
+        chunk = webidl.converters.any(chunk);
       }
       if (readableStreamDefaultControllerCanCloseOrEnqueue(this) === false) {
         throw new TypeError("The stream controller cannot close or enqueue");
@@ -744,9 +703,9 @@
     }
 
     error(e = undefined) {
-      assertBranded(this, ReadableStreamDefaultControllerPrototype);
+      webidl.assertBranded(this, ReadableStreamDefaultControllerPrototype, "ReadableStreamDefaultController");
       if (e !== undefined) {
-        e = convertAny(e);
+        e = webidl.converters.any(e);
       }
       readableStreamDefaultControllerError(this, e);
     }
@@ -867,10 +826,10 @@
   // surface) so the Rust bridge can call it after caching the function
   // global.
   function createFixedReadableStream(chunks) {
-    const stream = new ReadableStream(brand);
+    const stream = new ReadableStream(webidl.brand);
     initializeReadableStream(stream);
     stream[_detached] = false;
-    const controller = new ReadableStreamDefaultController(brand);
+    const controller = new ReadableStreamDefaultController(webidl.brand);
     controller[_stream] = stream;
     controller[_queue] = [];
     controller[_closeRequested] = true;

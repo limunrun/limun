@@ -22,11 +22,10 @@
 //     flag + extra args and returns the numeric ID directly — no
 //     `activeTimers` map needed (the Rust `event_loop` already owns the
 //     id→timer mapping, and `op_timer_clear(id)` looks it up there).
-//   - `webidl.converters.long`  → inline `convertLong` (no full WebIDL
-//     module yet — same approach as base64's inline `requiredArguments`/
-//     `convertDOMString`).
-//   - `webidl.converters.DOMString` (for string-callback eval) → inline
-//     `convertDOMString` (shared shape with base64/01_dom_exception).
+//   - `webidl.converters.long`  → `globalThis.__bootstrap.webidl`
+//     (shared `ext:limun/00_webidl.js`).
+//   - `webidl.converters.DOMString` (for string-callback eval) →
+//     `globalThis.__bootstrap.webidl` (same module).
 //
 // Dropped vs Deno (Limun doesn't model these yet):
 //   - Timer nesting depth tracking (HTML's 4ms floor for deeply nested
@@ -39,101 +38,15 @@
 
 ((globalThis) => {
   const { primordials } = globalThis.__bootstrap;
+  const webidl = globalThis.__bootstrap.webidl;
   const {
     op_timer_schedule,
     op_timer_clear,
     op_queue_microtask,
   } = globalThis.__limunOps;
   const {
-    MathPow,
-    MathSign,
-    MathTrunc,
-    Number,
-    NumberIsFinite,
-    ReflectApply,
-    TypeError,
     indirectEval,
   } = primordials;
-
-  // --- Inline WebIDL (minimal, pilot-scoped) -----------------------------
-
-  // `webidl.converters.DOMString(V)` — same inline as base64/
-  // 01_dom_exception. Strings pass through; symbols throw; everything
-  // else goes through `String(V)`.
-  function convertDOMString(V) {
-    if (typeof V === "string") {
-      return V;
-    }
-    if (typeof V === "symbol") {
-      throw new TypeError("Cannot convert a Symbol value to a string");
-    }
-    return String(V);
-  }
-
-  // `webidl.converters.long(V)` — Web IDL `long` (32-bit signed integer)
-  // conversion, no `enforceRange`, no `clamp`. Ports Deno's
-  // `createIntegerConversion(32, { unsigned: false })` from
-  // `00_webidl.js`. Steps:
-  //   1. `toNumber(V)` — `Number(V)`, throws on BigInt (matches Web IDL:
-  //      BigInt → Number throws `TypeError`).
-  //   2. Censor negative zero (`-0` → `+0`).
-  //   3. If not finite or zero, return 0.
-  //   4. Take the integer part (trunc towards zero, censor `-0`).
-  //   5. If within [-2^31, 2^31-1], return as-is.
-  //   6. Wrap modulo 2^32 into the signed range.
-  // Used for the `timeout` argument of `setTimeout`/`setInterval` and the
-  // `id` argument of `clearTimeout`/`clearInterval`. NaN, ±Infinity, and
-  // non-numeric values all coerce to 0 — matching the spec (a non-numeric
-  // `timeout` doesn't throw; it just fires ASAP).
-  const LONG_LOWER = -MathPow(2, 31); // -2147483648
-  const LONG_UPPER = MathPow(2, 31) - 1; // 2147483647
-  const TWO_TO_32 = MathPow(2, 32); // 4294967296
-  const TWO_TO_31 = MathPow(2, 31); // 2147483648
-
-  function toNumber(value) {
-    if (typeof value === "bigint") {
-      throw new TypeError("Cannot convert a BigInt value to a number");
-    }
-    return Number(value);
-  }
-
-  function censorNegativeZero(x) {
-    return x === 0 ? 0 : x;
-  }
-
-  function integerPart(n) {
-    return censorNegativeZero(MathTrunc(n));
-  }
-
-  // ECMA-262 modulo: result has the same sign as the divisor. `y` is
-  // always positive here (`TWO_TO_32`), so the result is always
-  // non-negative.
-  function modulo(x, y) {
-    const r = x % y;
-    // `MathSign(0)` is 0, but `y > 0` always here so the sign check
-    // simplifies: if `r` is negative, add `y` to flip the sign.
-    if (r !== 0 && MathSign(r) !== MathSign(y)) {
-      return r + y;
-    }
-    return r;
-  }
-
-  function convertLong(V) {
-    let x = toNumber(V);
-    x = censorNegativeZero(x);
-    if (!NumberIsFinite(x) || x === 0) {
-      return 0;
-    }
-    x = integerPart(x);
-    if (x >= LONG_LOWER && x <= LONG_UPPER) {
-      return x;
-    }
-    x = modulo(x, TWO_TO_32);
-    if (x >= TWO_TO_31) {
-      return x - TWO_TO_32;
-    }
-    return x;
-  }
 
   // --- `this` check (WHATWG "Illegal invocation") ------------------------
 
@@ -160,10 +73,10 @@
   function setTimeout(callback, timeout = 0, ...args) {
     checkThis(this);
     if (typeof callback !== "function") {
-      const unboundCallback = convertDOMString(callback);
+      const unboundCallback = webidl.converters.DOMString(callback);
       callback = () => indirectEval(unboundCallback);
     }
-    timeout = convertLong(timeout);
+    timeout = webidl.converters.long(timeout);
     return op_timer_schedule(callback, timeout, false, ...args);
   }
 
@@ -171,10 +84,10 @@
   function setInterval(callback, timeout = 0, ...args) {
     checkThis(this);
     if (typeof callback !== "function") {
-      const unboundCallback = convertDOMString(callback);
+      const unboundCallback = webidl.converters.DOMString(callback);
       callback = () => indirectEval(unboundCallback);
     }
-    timeout = convertLong(timeout);
+    timeout = webidl.converters.long(timeout);
     return op_timer_schedule(callback, timeout, true, ...args);
   }
 
@@ -187,13 +100,13 @@
   // no-op on unknown ids (matches spec and the previous Rust behavior).
   function clearTimeout(id = 0) {
     checkThis(this);
-    id = convertLong(id);
+    id = webidl.converters.long(id);
     op_timer_clear(id);
   }
 
   function clearInterval(id = 0) {
     checkThis(this);
-    id = convertLong(id);
+    id = webidl.converters.long(id);
     op_timer_clear(id);
   }
 

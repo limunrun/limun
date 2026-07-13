@@ -125,6 +125,47 @@ The flat `src/js/` directory is gone. Internal JS is colocated with its Rust:
   remain, build clean 0 warnings, WPT 752/753, all unit/infra tests pass, git diff is pure
   renames + path-string swaps (no logic change).
 
+## Post-migration cleanup — Item 2: Shared WebIDL module ✅ DONE
+
+Ported Deno's `ext/webidl/00_webidl.js` (1558 lines) into `src/web/00_webidl.js`
+(1616 lines), exposed as `globalThis.__bootstrap.webidl`. Rewired all 14 modules
+that had inline WebIDL copies (`00_url`, `01_dom_exception`, `02_event`,
+`02_timers`, `05_base64`, `06_streams`, `08_text_encoding`, `09_blob`,
+`10_form_data`, `20_headers`, `21_request`, `22_response`, `41_prompt` +
+`19_body` via adapters). Deleted every inline `requiredArguments`/
+`convertDOMString`/`convertUSVString`/`convertLong`/`convertObject`/`convertAny`/
+`convertUnsignedLongLong`/`brand` symbol/`assertBranded`/inline
+`mixinPairIterable` — now all delegate to `webidl.*`.
+
+### Ops added
+- `op_is_proxy(value) -> boolean` — `src/core/ops.rs`; the one `core.*` call in
+  Deno's webidl (`core.isProxy`), used by `createRecordConverter` to reject Proxy
+  traps. Calls `v8::Value::is_proxy()`. Registered on `__limunOps`.
+
+### Registry
+- `src/core/internal_js.rs` REGISTRY: `00_webidl.js` inserted after
+  `00_primordials.js`, before `01_dom_exception.js`. Specifier
+  `ext:limun/00_webidl.js`.
+
+### Deviations from Deno's WebIDL
+- `core.isProxy` → `op_is_proxy` op (no `core.*` shim in Limun).
+- `core.isArrayBuffer`/`isDataView`/`isTypedArray` → pure-JS
+  `ObjectPrototypeIsPrototypeOf` checks; `core.isSharedArrayBuffer` → constant
+  `false` (Limun has no SAB — `allowShared` opts collapse to spec-correct branch).
+- `internals.webidlBrand = brand` dropped (no `internals` namespace, no reader).
+- `return {…}` → `globalThis.__bootstrap.webidl = {…}` (Limun's cross-module pattern).
+
+### Module-local composites kept (delegate to webidl.converters.*)
+- `09_blob.js`: `convertBlobPart`/`convertBlobParts`/`encodeUSVStringPartToBytes`
+  (Blob-specific union dispatch + byte snapshot).
+- `10_form_data.js`: `roundTripUSVString` (byte-identical USVString round-trip).
+- `08_text_encoding.js`: `convertTextDecoderOptions`/`convertTextDecodeOptions`
+  (tiny dicts, inlined to avoid per-call dictionary-converter allocation).
+- `21_request.js`/`22_response.js`: 2-arg `assertBranded` adapters binding the
+  interface name for `19_body.js`'s `mixinBody` callback.
+
+Verified: build clean 0 warnings, WPT 752/753, all unit/infra tests pass.
+
 ## Notes
 - Build: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo build`
 - WPT: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo run -- tests/wpt/run.js`

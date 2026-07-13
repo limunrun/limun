@@ -18,12 +18,9 @@
 //   - `__bootstrap`            → `globalThis.__bootstrap`
 //   - `core`                   → not used (no ops, no hostObjectBrand)
 //   - `webidl.brand` /
-//     `webidl.assertBranded`  → inline equivalents (no full WebIDL module
-//     yet — same approach as base64's inline `requiredArguments`/
-//     `convertDOMString`).
-//   - `webidl.converters.DOMString` → inline `convertDOMString` (shared
-//     shape with base64; when a real WebIDL module lands this collapses
-//     into it).
+//     `webidl.assertBranded` /
+//     `webidl.converters.DOMString` → `globalThis.__bootstrap.webidl`
+//     (the shared `ext:limun/00_webidl.js` module).
 //   - `webidl.configureInterface` → dropped (it only sets a `[Symbol.toStringTag]`
 //     on the prototype; DOMException has no `[Symbol.toStringTag]` per spec,
 //     and Deno's `configureInterface` is a no-op for classes without a
@@ -38,6 +35,7 @@
 
 ((globalThis) => {
   const { primordials } = globalThis.__bootstrap;
+  const webidl = globalThis.__bootstrap.webidl;
   const {
     Error,
     ErrorPrototype,
@@ -51,40 +49,6 @@
     Symbol,
     TypeError,
   } = primordials;
-
-  // --- Inline WebIDL (minimal, pilot-scoped) -----------------------------
-
-  // `webidl.brand` — a Symbol used as a brand marker. Set on every
-  // DOMException instance in the constructor; checked by the getters via
-  // `assertBranded` so a plain `{}` with `DOMException.prototype` manually
-  // welded on (or an object from a different class) fails the brand check
-  // and throws `TypeError: Illegal invocation`.
-  const brand = Symbol("[[webidl.brand]]");
-
-  // `webidl.assertBranded(self, prototype)` — throw `TypeError` if `self`
-  // isn't branded or isn't proto-chained to `prototype`. Matches Deno's
-  // `00_webidl.js` message ("Illegal invocation") for the no-interface-name
-  // path (Deno's DOMException getters call `assertBranded(this, proto)`
-  // without an interface name).
-  function assertBranded(self, prototype) {
-    if (
-      !ObjectPrototypeIsPrototypeOf(prototype, self) || self[brand] !== brand
-    ) {
-      throw new TypeError("Illegal invocation");
-    }
-  }
-
-  // `webidl.converters.DOMString(V)` — same inline as base64. Strings pass
-  // through; symbols throw; everything else goes through `String(V)`.
-  function convertDOMString(V) {
-    if (typeof V === "string") {
-      return V;
-    }
-    if (typeof V === "symbol") {
-      throw new TypeError("Cannot convert a Symbol value to a string");
-    }
-    return String(V);
-  }
 
   // --- Private fields (Symbols, not #private — matches Deno) --------------
 
@@ -166,7 +130,7 @@
 
     // https://webidl.spec.whatwg.org/#dom-domexception-domexception
     constructor(message = "", name = "Error") {
-      message = convertDOMString(message);
+      message = webidl.converters.DOMString(message);
 
       // Run the `Error` constructor with `new.target`'s prototype so the
       // result gets V8's `stack` property and `[[ErrorData]]` internal
@@ -174,29 +138,29 @@
       // proto chain rather than via a user-field check).
       const error = ReflectConstruct(Error, [], new.target);
 
-      name = convertDOMString(name);
+      name = webidl.converters.DOMString(name);
       const code = nameToCodeMapping[name] ?? 0;
 
       error[_message] = message;
       error[_name] = name;
       error[_code] = code;
-      error[brand] = brand;
+      error[webidl.brand] = webidl.brand;
 
       return error;
     }
 
     get message() {
-      assertBranded(this, DOMExceptionPrototype);
+      webidl.assertBranded(this, DOMExceptionPrototype, "DOMException");
       return this[_message];
     }
 
     get name() {
-      assertBranded(this, DOMExceptionPrototype);
+      webidl.assertBranded(this, DOMExceptionPrototype, "DOMException");
       return this[_name];
     }
 
     get code() {
-      assertBranded(this, DOMExceptionPrototype);
+      webidl.assertBranded(this, DOMExceptionPrototype, "DOMException");
       return this[_code];
     }
   }

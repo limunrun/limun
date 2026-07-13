@@ -31,10 +31,12 @@
 //     `op_encoding_decode_single` is used)
 //   - `core.encode`            → cached `TextEncoder` (`ext:limun/08_text_encoding.js`)
 //   - `webidl.brand` /
-//     `webidl.assertBranded`  → inline equivalents (same pattern as
-//     `01_dom_exception.js`).
-//   - `webidl.converters.*`    → inline converters (no full WebIDL module
-//     yet — same approach as base64/DOMException/streams).
+//     `webidl.assertBranded` → `globalThis.__bootstrap.webidl` (shared
+//     `ext:limun/00_webidl.js`).
+//   - `webidl.converters.*` → module-local composite converters
+//     (`convertBlobPart`/`convertBlobParts`) that delegate to
+//     `webidl.converters.USVString` for the leaf string conversion; the
+//     union dispatch / byte-copy logic is Blob-specific and stays here.
 //   - `webidl.configureInterface` → dropped (only sets a
 //     `[Symbol.toStringTag]`; set inline instead).
 //   - `BlobReference` / `op_blob_*` / file-backed blob store /
@@ -53,6 +55,7 @@
 
 ((globalThis) => {
   const { primordials } = globalThis.__bootstrap;
+  const webidl = globalThis.__bootstrap.webidl;
   const {
     ArrayBufferPrototypeSlice,
     DateNow,
@@ -95,28 +98,25 @@
   // module in the bootstrap order.
   const textEncoder = new TextEncoder();
 
-  // --- Inline WebIDL (minimal, pilot-scoped) -----------------------------
+  // --- Module-local `USVString`/BlobPart/sequence<BlobPart> converters ---
+  //
+  // These are module-specific composite converters (Blob's BlobPart is a
+  // `(ArrayBuffer or ArrayBufferView) or Blob or USVString` union that
+  // produces a `Uint8Array` snapshot — not a generic WebIDL converter
+  // shape). They delegate to `webidl.converters.USVString` for the leaf
+  // string conversion; the union dispatch / byte-copy logic is
+  // Blob-specific and stays module-local. The shared `webidl` module
+  // owns the standard primitive converters (`DOMString`/`USVString`/
+  // `long`/etc.); no inline copies of those remain.
 
-  // Brand symbol — same shape as `01_dom_exception.js`. Set on every
-  // instance in the constructor; checked by the getters/methods via
-  // `assertBranded` so a plain `{}` with the prototype welded on (or an
-  // object from another class) fails the brand check and throws
-  // `TypeError: Illegal invocation`.
-  const brand = Symbol("[[webidl.brand]]");
-
-  function assertBranded(self, prototype) {
-    if (
-      !ObjectPrototypeIsPrototypeOf(prototype, self) || self[brand] !== brand
-    ) {
-      throw new TypeError("Illegal invocation");
-    }
-  }
-
-  // `webidl.converters.USVString(V)` — ToString then UTF-8 encode (which
-  // replaces unpaired surrogates with U+FFFD). Done implicitly by
-  // `TextEncoder.prototype.encode`.
-  function convertUSVString(V) {
-    return textEncoder.encode(String(V));
+  // `USVString` BlobPart → a `Uint8Array` of the UTF-8 bytes. Delegates
+  // the leaf USVString conversion (lone-surrogate replacement) to
+  // `webidl.converters.USVString`, then UTF-8 encodes the result. Blob
+  // stores parts as bytes, not strings — this is the module-specific
+  // composite that adapts the standard string converter to Blob's
+  // byte-storage shape.
+  function encodeUSVStringPartToBytes(V) {
+    return textEncoder.encode(webidl.converters.USVString(V));
   }
 
   // --- Type guards (primordial-based, tamper-resistant) ------------------
@@ -212,7 +212,7 @@
         return new Uint8Array(view);
       }
     }
-    return convertUSVString(V);
+    return encodeUSVStringPartToBytes(V);
   }
 
   // `sequence<BlobPart>`: undefined → empty (default value); null or a
@@ -293,18 +293,18 @@
         }
       }
 
-      this[brand] = brand;
+      this[webidl.brand] = webidl.brand;
       this[_bytes] = concatBytes(chunks);
       this[_type] = normalizeType(type);
     }
 
     get size() {
-      assertBranded(this, BlobPrototype);
+      webidl.assertBranded(this, BlobPrototype, "Blob");
       return TypedArrayPrototypeGetByteLength(this[_bytes]);
     }
 
     get type() {
-      assertBranded(this, BlobPrototype);
+      webidl.assertBranded(this, BlobPrototype, "Blob");
       return this[_type];
     }
 
@@ -316,7 +316,7 @@
     // they're swapped. The new Blob's `type` is `contentType`
     // (normalized) or `""`.
     slice(start, end, contentType) {
-      assertBranded(this, BlobPrototype);
+      webidl.assertBranded(this, BlobPrototype, "Blob");
       const size = TypedArrayPrototypeGetByteLength(this[_bytes]);
 
       let relativeStart;
@@ -365,7 +365,7 @@
     // requests `fatal: false, ignore_bom: false` → BOM-removed, lossy
     // (invalid bytes replaced, not thrown).
     async text() {
-      assertBranded(this, BlobPrototype);
+      webidl.assertBranded(this, BlobPrototype, "Blob");
       return op_encoding_decode_single(this[_bytes], "utf-8", false, false);
     }
 
@@ -373,7 +373,7 @@
     // `new Uint8Array(this[_bytes])` copies into a new backing buffer
     // (Blob is immutable, so a snapshot, not a view, is returned).
     async arrayBuffer() {
-      assertBranded(this, BlobPrototype);
+      webidl.assertBranded(this, BlobPrototype, "Blob");
       const copy = new Uint8Array(this[_bytes]);
       return copy.buffer;
     }
@@ -383,7 +383,7 @@
     // `arrayBuffer()`). Same copy as `arrayBuffer()` but returns the
     // view directly instead of its backing buffer.
     async bytes() {
-      assertBranded(this, BlobPrototype);
+      webidl.assertBranded(this, BlobPrototype, "Blob");
       return new Uint8Array(this[_bytes]);
     }
 
@@ -393,7 +393,7 @@
     // `06_streams.js` — the same path Rust callers
     // (`Response.body`/`Request.body`) take.
     stream() {
-      assertBranded(this, BlobPrototype);
+      webidl.assertBranded(this, BlobPrototype, "Blob");
       return globalThis.__bootstrap.createFixedReadableStream([this[_bytes]]);
     }
   }
@@ -430,12 +430,12 @@
     }
 
     get name() {
-      assertBranded(this, FilePrototype);
+      webidl.assertBranded(this, FilePrototype, "File");
       return this[_name];
     }
 
     get lastModified() {
-      assertBranded(this, FilePrototype);
+      webidl.assertBranded(this, FilePrototype, "File");
       return this[_lastModified];
     }
   }

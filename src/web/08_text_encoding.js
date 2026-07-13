@@ -16,12 +16,14 @@
 //   - `__bootstrap`            → `globalThis.__bootstrap`
 //   - `core.ops`               → `globalThis.__limunOps`
 //   - `webidl.brand` /
-//     `webidl.assertBranded`  → inline equivalents (same pattern as
-//     `01_dom_exception.js`).
-//   - `webidl.converters.DOMString` → inline `convertDOMString` (shared
-//     shape with base64 / DOMException).
+//     `webidl.assertBranded` /
+//     `webidl.converters.DOMString` → `globalThis.__bootstrap.webidl`
+//     (shared `ext:limun/00_webidl.js`).
 //   - `webidl.converters.TextDecoderOptions` /
-//     `TextDecodeOptions`     → inline dictionary converters.
+//     `TextDecodeOptions`     → inline dictionary converters (module-
+//     local; they delegate to `webidl.converters.boolean` for leaf
+//     conversion but keep the spec's simple `{ fatal: false, … }` shape
+//     inlined — avoids a dictionary-converter allocation per call).
 //   - `webidl.configureInterface` → dropped (only sets a
 //     `[Symbol.toStringTag]`; not needed for TextEncoder/TextDecoder per
 //     spec — neither interface declares one).
@@ -42,6 +44,7 @@
 
 ((globalThis) => {
   const { primordials } = globalThis.__bootstrap;
+  const webidl = globalThis.__bootstrap.webidl;
   const {
     op_encoding_normalize_label,
     op_encoding_decode_single,
@@ -58,40 +61,15 @@
     Uint8Array,
   } = primordials;
 
-  // --- Inline WebIDL (minimal, same shape as base64/DOMException) ---------
-
-  // `webidl.brand` — a Symbol used as a brand marker. Set on every
-  // TextEncoder/TextDecoder instance in the constructor; checked by the
-  // getters via `assertBranded` so a plain `{}` with the prototype welded
-  // on (or an object from a different class) fails the brand check and
-  // throws `TypeError: Illegal invocation`.
-  const brand = Symbol("[[webidl.brand]]");
-
-  // `webidl.assertBranded(self, prototype)` — throw `TypeError` if `self`
-  // isn't branded or isn't proto-chained to `prototype`. Matches Deno's
-  // `00_webidl.js` message ("Illegal invocation").
-  function assertBranded(self, prototype) {
-    if (
-      !ObjectPrototypeIsPrototypeOf(prototype, self) ||
-      self[brand] !== brand
-    ) {
-      throw new TypeError("Illegal invocation");
-    }
-  }
-
-  // `webidl.converters.DOMString(V)` — Web IDL DOMString conversion.
-  // Strings pass through; symbols throw (V8's `String(sym)` would return
-  // the description, which is non-conformant); everything else goes
-  // through `String(V)`.
-  function convertDOMString(V) {
-    if (typeof V === "string") {
-      return V;
-    }
-    if (typeof V === "symbol") {
-      throw new TypeError("Cannot convert a Symbol value to a string");
-    }
-    return String(V);
-  }
+  // --- Inline dictionary converters (module-specific composites) --------
+  //
+  // `TextDecoderOptions` / `TextDecodeOptions` are simple enough that they
+  // stay module-local (they delegate to `webidl.converters.*` for the leaf
+  // `boolean` conversion, but the spec's "default false, optional key"
+  // shape is inlined here rather than built via the full
+  // `webidl.createDictionaryConverter` machinery — matches the previous
+  // inline impl and avoids a dictionary-converter allocation for the
+  // common single-arg case).
 
   // `webidl.converters.TextDecoderOptions` — inline dictionary converter.
   // Spec: `{ fatal: boolean = false, ignoreBOM: boolean = false }`.
@@ -148,7 +126,7 @@
     // https://encoding.spec.whatwg.org/#dom-textdecoder
     constructor(label = "utf-8", options = undefined) {
       const prefix = "Failed to construct 'TextDecoder'";
-      label = convertDOMString(label);
+      label = webidl.converters.DOMString(label);
       const opts = convertTextDecoderOptions(options);
 
       // Fast path for common UTF-8 labels — skip the Rust op call (matches
@@ -177,27 +155,27 @@
       this[_fatal] = opts.fatal;
       this[_ignoreBOM] = opts.ignoreBOM;
       this[_handle] = null;
-      this[brand] = brand;
+      this[webidl.brand] = webidl.brand;
     }
 
     get encoding() {
-      assertBranded(this, TextDecoderPrototype);
+      webidl.assertBranded(this, TextDecoderPrototype, "TextDecoder");
       return this[_encoding];
     }
 
     get fatal() {
-      assertBranded(this, TextDecoderPrototype);
+      webidl.assertBranded(this, TextDecoderPrototype, "TextDecoder");
       return this[_fatal];
     }
 
     get ignoreBOM() {
-      assertBranded(this, TextDecoderPrototype);
+      webidl.assertBranded(this, TextDecoderPrototype, "TextDecoder");
       return this[_ignoreBOM];
     }
 
     // https://encoding.spec.whatwg.org/#dom-textdecoder-decode
     decode(input = new Uint8Array(), options = undefined) {
-      assertBranded(this, TextDecoderPrototype);
+      webidl.assertBranded(this, TextDecoderPrototype, "TextDecoder");
 
       // Normalize `input` to a BufferSource. The spec allows
       // ArrayBufferView or ArrayBuffer. The fast path: a Uint8Array with
@@ -283,11 +261,11 @@
 
   class TextEncoder {
     constructor() {
-      this[brand] = brand;
+      this[webidl.brand] = webidl.brand;
     }
 
     get encoding() {
-      assertBranded(this, TextEncoderPrototype);
+      webidl.assertBranded(this, TextEncoderPrototype, "TextEncoder");
       return "utf-8";
     }
 
@@ -302,7 +280,7 @@
     // explicit `undefined` too (ES default-parameter semantics match the
     // WebIDL "default value" semantics here).
     encode(input = "") {
-      assertBranded(this, TextEncoderPrototype);
+      webidl.assertBranded(this, TextEncoderPrototype, "TextEncoder");
       if (typeof input !== "string") {
         if (input === undefined) {
           input = "";
@@ -326,7 +304,7 @@
 
     // https://encoding.spec.whatwg.org/#dom-textencoder-encodeinto
     encodeInto(source, destination) {
-      assertBranded(this, TextEncoderPrototype);
+      webidl.assertBranded(this, TextEncoderPrototype, "TextEncoder");
       // `source` is USVString — the op replaces lone surrogates with
       // U+FFFD (matching USVString semantics via V8's
       // `WriteFlags::kReplaceInvalidUtf8`). No DOMString conversion here

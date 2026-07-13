@@ -35,6 +35,7 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
 
     set_fn(scope, ops, "op_test_add", op_test_add);
     set_fn(scope, ops, "op_print", op_print);
+    set_fn(scope, ops, "op_is_proxy", op_is_proxy);
     set_fn(scope, ops, "op_base64_atob", op_base64_atob);
     set_fn(scope, ops, "op_base64_btoa", op_base64_btoa);
     set_fn(scope, ops, "op_encoding_normalize_label", op_encoding_normalize_label);
@@ -96,6 +97,21 @@ fn op_test_add(
     let b = args.get(1).integer_value(scope).unwrap_or(0);
     let sum = v8::Number::new(scope, (a + b) as f64);
     rv.set(sum.into());
+}
+
+/// `op_is_proxy(value: any) -> boolean` — returns `true` iff `value` is a
+/// `Proxy` (V8 `Value::is_proxy`). The one bit of irreducible native work
+/// backing the shared WebIDL module's `createRecordConverter` fast path
+/// (a Proxy with an own-keys trap would otherwise sneak past the
+/// `for...in` + `ObjectHasOwn` loop). Pure spec — see
+/// `ext:limun/00_webidl.js`'s `createRecordConverter`.
+fn op_is_proxy(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let is_proxy = args.get(0).is_proxy();
+    rv.set(v8::Boolean::new(scope, is_proxy).into());
 }
 
 /// `op_print(text: String, is_err: bool) -> undefined` — writes `text` to

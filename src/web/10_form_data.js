@@ -25,9 +25,13 @@
 //   - `core.ops`               → `globalThis.__limunOps` (unused — no op)
 //   - `core.encode` / `core.decode` → cached `TextEncoder`/`TextDecoder`
 //   - `webidl.brand` /
-//     `webidl.assertBranded`  → inline equivalents (same pattern as
-//     `09_blob.js`).
-//   - `webidl.converters.*`    → inline converters.
+//     `webidl.assertBranded` /
+//     `webidl.requiredArguments` → `globalThis.__bootstrap.webidl`
+//     (shared `ext:limun/00_webidl.js`).
+//   - `webidl.converters.*`    → module-local `roundTripUSVString`
+//     (UTF-8 round-trip via the cached TextEncoder/decoder; equivalent
+//     to `webidl.converters.USVString` but matches the previous inline
+//     impl's byte-round-trip path).
 //   - `webidl.mixinPairIterable` → inline iterator wiring (`entries`/
 //     `keys`/`values`/`[Symbol.iterator]`/`forEach`), same shape as the
 //     previous Rust impl (a snapshot of the entry list, iterated by
@@ -47,6 +51,7 @@
 
 ((globalThis) => {
   const { primordials } = globalThis.__bootstrap;
+  const webidl = globalThis.__bootstrap.webidl;
   const {
     ArrayPrototypePush,
     ArrayPrototypeSplice,
@@ -75,33 +80,23 @@
   const { op_encoding_decode_single } = globalThis.__limunOps;
   const textEncoder = new TextEncoder();
 
-  // --- Inline WebIDL (minimal, pilot-scoped) -----------------------------
+  // --- Module-local USVString round-trip converter -----------------------
+  //
+  // `FormData` stores `USVString` values as JS strings (not bytes —
+  // unlike Blob's BlobPart path). ToString then UTF-8 round-trip
+  // (replaces unpaired surrogates with U+FFFD) via the cached
+  // `TextEncoder` + `op_encoding_decode_single`. Module-local composite
+  // (the *return shape* is a JS string, and the round-trip-via-bytes
+  // path here is equivalent to `webidl.converters.USVString`'s
+  // `String.prototype.toWellFormed` — UTF-8 encode + decode = lone-
+  // surrogate replacement — and matches the previous inline impl
+  // exactly). The standard `webidl.converters.USVString` could be used
+  // directly; this keeps the previous byte-round-trip path so the
+  // observable behavior is byte-identical to the pre-extraction impl.
 
-  const brand = Symbol("[[webidl.brand]]");
-
-  function assertBranded(self, prototype) {
-    if (
-      !ObjectPrototypeIsPrototypeOf(prototype, self) || self[brand] !== brand
-    ) {
-      throw new TypeError("Illegal invocation");
-    }
-  }
-
-  // `webidl.converters.USVString(V)` — ToString then UTF-8 round-trip
-  // (replaces unpaired surrogates with U+FFFD). The result is a JS
-  // string; we don't return the bytes here (unlike Blob's BlobPart path)
-  // — FormData stores `USVString` values as JS strings.
-  function convertUSVString(V) {
+  function roundTripUSVString(V) {
     const bytes = textEncoder.encode(String(V));
     return op_encoding_decode_single(bytes, "utf-8", false, false);
-  }
-
-  function requiredArguments(length, required, prefix) {
-    if (length < required) {
-      throw new TypeError(
-        `${prefix}: ${required} argument${required === 1 ? "" : "s"} required, but only ${length} present`,
-      );
-    }
   }
 
   // --- Private fields ----------------------------------------------------
@@ -142,21 +137,21 @@
     // Spec's optional `HTMLFormElement` arg isn't supported (no DOM) —
     // args are silently ignored, matching the previous Rust behavior.
     constructor() {
-      this[brand] = brand;
+      this[webidl.brand] = webidl.brand;
     }
 
     append(name, valueOrBlobValue, filename) {
-      assertBranded(this, FormDataPrototype);
+      webidl.assertBranded(this, FormDataPrototype, "FormData");
       const prefix = "Failed to execute 'append' on 'FormData'";
-      requiredArguments(arguments.length, 2, prefix);
+      webidl.requiredArguments(arguments.length, 2, prefix);
 
-      name = convertUSVString(name);
+      name = roundTripUSVString(name);
       if (ObjectPrototypeIsPrototypeOf(BlobPrototype, valueOrBlobValue)) {
         if (filename !== undefined) {
-          filename = convertUSVString(filename);
+          filename = roundTripUSVString(filename);
         }
       } else {
-        valueOrBlobValue = convertUSVString(valueOrBlobValue);
+        valueOrBlobValue = roundTripUSVString(valueOrBlobValue);
       }
 
       const entry = createEntry(name, valueOrBlobValue, filename);
@@ -164,10 +159,10 @@
     }
 
     delete(name) {
-      assertBranded(this, FormDataPrototype);
+      webidl.assertBranded(this, FormDataPrototype, "FormData");
       const prefix = "Failed to execute 'delete' on 'FormData'";
-      requiredArguments(arguments.length, 1, prefix);
-      name = convertUSVString(name);
+      webidl.requiredArguments(arguments.length, 1, prefix);
+      name = roundTripUSVString(name);
 
       const list = this[entryList];
       let writeIdx = 0;
@@ -182,10 +177,10 @@
     }
 
     get(name) {
-      assertBranded(this, FormDataPrototype);
+      webidl.assertBranded(this, FormDataPrototype, "FormData");
       const prefix = "Failed to execute 'get' on 'FormData'";
-      requiredArguments(arguments.length, 1, prefix);
-      name = convertUSVString(name);
+      webidl.requiredArguments(arguments.length, 1, prefix);
+      name = roundTripUSVString(name);
 
       const entries = this[entryList];
       for (let i = 0; i < entries.length; ++i) {
@@ -195,10 +190,10 @@
     }
 
     getAll(name) {
-      assertBranded(this, FormDataPrototype);
+      webidl.assertBranded(this, FormDataPrototype, "FormData");
       const prefix = "Failed to execute 'getAll' on 'FormData'";
-      requiredArguments(arguments.length, 1, prefix);
-      name = convertUSVString(name);
+      webidl.requiredArguments(arguments.length, 1, prefix);
+      name = roundTripUSVString(name);
 
       const returnList = [];
       const entries = this[entryList];
@@ -211,10 +206,10 @@
     }
 
     has(name) {
-      assertBranded(this, FormDataPrototype);
+      webidl.assertBranded(this, FormDataPrototype, "FormData");
       const prefix = "Failed to execute 'has' on 'FormData'";
-      requiredArguments(arguments.length, 1, prefix);
-      name = convertUSVString(name);
+      webidl.requiredArguments(arguments.length, 1, prefix);
+      name = roundTripUSVString(name);
 
       const entries = this[entryList];
       for (let i = 0; i < entries.length; ++i) {
@@ -224,17 +219,17 @@
     }
 
     set(name, valueOrBlobValue, filename) {
-      assertBranded(this, FormDataPrototype);
+      webidl.assertBranded(this, FormDataPrototype, "FormData");
       const prefix = "Failed to execute 'set' on 'FormData'";
-      requiredArguments(arguments.length, 2, prefix);
+      webidl.requiredArguments(arguments.length, 2, prefix);
 
-      name = convertUSVString(name);
+      name = roundTripUSVString(name);
       if (ObjectPrototypeIsPrototypeOf(BlobPrototype, valueOrBlobValue)) {
         if (filename !== undefined) {
-          filename = convertUSVString(filename);
+          filename = roundTripUSVString(filename);
         }
       } else {
-        valueOrBlobValue = convertUSVString(valueOrBlobValue);
+        valueOrBlobValue = roundTripUSVString(valueOrBlobValue);
       }
 
       const entry = createEntry(name, valueOrBlobValue, filename);
@@ -262,9 +257,9 @@
     // `forEach(callback, thisArg)` — snapshot the entry list, call
     // `callback(value, key, this)` for each entry.
     forEach(callback, thisArg) {
-      assertBranded(this, FormDataPrototype);
+      webidl.assertBranded(this, FormDataPrototype, "FormData");
       const prefix = "Failed to execute 'forEach' on 'FormData'";
-      requiredArguments(arguments.length, 1, prefix);
+      webidl.requiredArguments(arguments.length, 1, prefix);
       if (typeof callback !== "function") {
         throw new TypeError(`${prefix}: callback must be a function`);
       }
@@ -278,17 +273,17 @@
     }
 
     entries() {
-      assertBranded(this, FormDataPrototype);
+      webidl.assertBranded(this, FormDataPrototype, "FormData");
       return pairIterator(this[entryList], "entries");
     }
 
     keys() {
-      assertBranded(this, FormDataPrototype);
+      webidl.assertBranded(this, FormDataPrototype, "FormData");
       return pairIterator(this[entryList], "keys");
     }
 
     values() {
-      assertBranded(this, FormDataPrototype);
+      webidl.assertBranded(this, FormDataPrototype, "FormData");
       return pairIterator(this[entryList], "values");
     }
   }

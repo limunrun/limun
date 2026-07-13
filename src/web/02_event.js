@@ -21,12 +21,10 @@
 //   - `__bootstrap`            → `globalThis.__bootstrap`
 //   - `core.ops`               → `globalThis.__limunOps`
 //   - `webidl.brand` /
-//     `webidl.assertBranded`  → inline equivalents (same pattern as
-//     `01_dom_exception.js`).
-//   - `webidl.requiredArguments` → inline `requiredArguments` (same shape
-//     as `05_base64.js`).
-//   - `webidl.converters.any`/`DOMString`/`unsigned long long` → inline
-//     converters.
+//     `webidl.assertBranded` /
+//     `webidl.requiredArguments` /
+//     `webidl.converters.any`/`DOMString`/`"unsigned long long"`
+//     → `globalThis.__bootstrap.webidl` (shared `ext:limun/00_webidl.js`).
 //   - `webidl.configureInterface` → dropped (only sets
 //     `[Symbol.toStringTag]`; Limun sets the tag inline).
 //   - `core.loadExtScript("ext:deno_web/02_event.js").…` → in-module
@@ -91,6 +89,7 @@
 
 ((globalThis) => {
   const { primordials } = globalThis.__bootstrap;
+  const webidl = globalThis.__bootstrap.webidl;
   const { op_now, op_timer_schedule, op_timer_clear } = globalThis.__limunOps;
   const {
     ArrayPrototypeIncludes,
@@ -112,70 +111,6 @@
     SymbolToStringTag,
     TypeError,
   } = primordials;
-
-  // --- Inline WebIDL (minimal — same shape as 01_dom_exception/05_base64) -
-
-  const brand = Symbol("[[webidl.brand]]");
-
-  function assertBranded(self, prototype) {
-    if (
-      !ObjectPrototypeIsPrototypeOf(prototype, self) || self[brand] !== brand
-    ) {
-      throw new TypeError("Illegal invocation");
-    }
-  }
-
-  function requiredArguments(length, required, prefix) {
-    if (length < required) {
-      throw new TypeError(
-        `${prefix}: ${required} argument${required === 1 ? "" : "s"} required, but only ${length} present.`,
-      );
-    }
-  }
-
-  function convertDOMString(V) {
-    if (typeof V === "string") return V;
-    if (typeof V === "symbol") {
-      throw new TypeError("Cannot convert a Symbol value to a string");
-    }
-    return String(V);
-  }
-
-  // `webidl.converters.any(V)` — identity, with `undefined` for missing.
-  function convertAny(V) {
-    return V;
-  }
-
-  // `webidl.converters["unsigned long long"](V, prefix, name, { enforceRange })`
-  // — Web IDL `unsigned long long` (64-bit unsigned integer). Used for
-  // `AbortSignal.timeout(ms)`. Steps: `toNumber`, censor `-0`, if not
-  // finite or 0 return 0, `integerPart` (trunc towards zero), then range
-  // check. With `enforceRange`, out-of-range throws; without, wraps mod
-  // 2^64. Limun's timers use `f64` internally (ms), so values above
-  // 2^53 lose precision anyway — but the conversion is spec-correct up
-  // to the timer op's `f64` boundary.
-  function convertUnsignedLongLong(V, prefix, name, opts = { __proto__: null }) {
-    let x = typeof V === "bigint"
-      ? (() => { throw new TypeError("Cannot convert a BigInt value to a number"); })()
-      : Number(V);
-    if (x === 0) return 0;
-    if (!Number.isFinite(x)) {
-      if (opts.enforceRange) {
-        throw new TypeError(
-          `${prefix}: ${name} is out of range (not a finite number)`,
-        );
-      }
-      return 0;
-    }
-    x = Math.trunc(x);
-    if (x < 0) {
-      if (opts.enforceRange) {
-        throw new TypeError(`${prefix}: ${name} is out of range (negative)`);
-      }
-      x = x + 18446744073709551616; // wrap mod 2^64
-    }
-    return x;
-  }
 
   // --- Event: private fields (Symbols) ------------------------------------
 
@@ -199,8 +134,8 @@
 
   class Event {
     constructor(type, eventInitDict = { __proto__: null }) {
-      requiredArguments(arguments.length, 1, "Failed to construct 'Event'");
-      type = convertDOMString(type, "Failed to construct 'Event'", "Argument 1");
+      webidl.requiredArguments(arguments.length, 1, "Failed to construct 'Event'");
+      type = webidl.converters.DOMString(type, "Failed to construct 'Event'", "Argument 1");
 
       this[_canceledFlag] = false;
       this[_stopPropagationFlag] = false;
@@ -222,7 +157,7 @@
         target: null,
         timeStamp: op_now(),
       };
-      this[brand] = brand;
+      this[webidl.brand] = webidl.brand;
     }
 
     get type() {
@@ -340,7 +275,7 @@
     #detail = null;
 
     constructor(type, eventInitDict = { __proto__: null }) {
-      requiredArguments(
+      webidl.requiredArguments(
         arguments.length,
         1,
         "Failed to construct 'CustomEvent'",
@@ -360,7 +295,7 @@
     // (`"initCustomEvent" in event`) works; updates the stored fields to
     // match the previous Rust behavior.
     initCustomEvent(type, bubbles = false, cancelable = false, detail = null) {
-      this[_attributes].type = convertDOMString(type);
+      this[_attributes].type = webidl.converters.DOMString(type);
       this[_attributes].bubbles = Boolean(bubbles);
       this[_attributes].cancelable = Boolean(cancelable);
       this.#detail = detail;
@@ -442,21 +377,21 @@
 
   class EventTarget {
     constructor() {
-      this[brand] = brand;
+      this[webidl.brand] = webidl.brand;
       // Lazy: `eventTargetData` allocated on first `addEventListener`
       // (most short-lived EventTargets never register a listener).
     }
 
     addEventListener(type, callback, options) {
       const self = this;
-      assertBranded(self, EventTargetPrototype);
-      requiredArguments(
+      webidl.assertBranded(self, EventTargetPrototype, "EventTarget");
+      webidl.requiredArguments(
         arguments.length,
         2,
         "Failed to execute 'addEventListener' on 'EventTarget'",
       );
 
-      type = convertDOMString(type);
+      type = webidl.converters.DOMString(type);
       if (callback === null) return;
 
       const opts = normalizeAddOptions(options);
@@ -515,8 +450,8 @@
 
     removeEventListener(type, callback, options) {
       const self = this;
-      assertBranded(self, EventTargetPrototype);
-      requiredArguments(
+      webidl.assertBranded(self, EventTargetPrototype, "EventTarget");
+      webidl.requiredArguments(
         arguments.length,
         2,
         "Failed to execute 'removeEventListener' on 'EventTarget'",
@@ -524,7 +459,7 @@
 
       const data = self[eventTargetData];
       if (data === undefined || callback === null) return;
-      type = convertDOMString(type);
+      type = webidl.converters.DOMString(type);
       const { listeners } = data;
       const list = listeners.get(type);
       if (!list) return;
@@ -558,8 +493,8 @@
 
     dispatchEvent(event) {
       const self = this;
-      assertBranded(self, EventTargetPrototype);
-      requiredArguments(
+      webidl.assertBranded(self, EventTargetPrototype, "EventTarget");
+      webidl.requiredArguments(
         arguments.length,
         1,
         "Failed to execute 'dispatchEvent' on 'EventTarget'",
@@ -790,7 +725,7 @@
 
     static abort(reason = undefined) {
       if (reason !== undefined) {
-        reason = convertAny(reason);
+        reason = webidl.converters.any(reason);
       }
       const signal = new AbortSignal(illegalConstructorKey);
       signal[signalAbort](reason);
@@ -799,8 +734,8 @@
 
     static timeout(millis) {
       const prefix = "Failed to execute 'AbortSignal.timeout'";
-      requiredArguments(arguments.length, 1, prefix);
-      millis = convertUnsignedLongLong(
+      webidl.requiredArguments(arguments.length, 1, prefix);
+      millis = webidl.converters["unsigned long long"](
         millis,
         prefix,
         "Argument 1",
@@ -833,7 +768,7 @@
 
     static any(signals) {
       const prefix = "Failed to execute 'AbortSignal.any'";
-      requiredArguments(arguments.length, 1, prefix);
+      webidl.requiredArguments(arguments.length, 1, prefix);
       return createDependentAbortSignal(signals, prefix);
     }
 
@@ -903,17 +838,17 @@
     }
 
     get aborted() {
-      assertBranded(this, AbortSignalPrototype);
+      webidl.assertBranded(this, AbortSignalPrototype, "AbortSignal");
       return this[abortReason] !== undefined;
     }
 
     get reason() {
-      assertBranded(this, AbortSignalPrototype);
+      webidl.assertBranded(this, AbortSignalPrototype, "AbortSignal");
       return this[abortReason];
     }
 
     throwIfAborted() {
-      assertBranded(this, AbortSignalPrototype);
+      webidl.assertBranded(this, AbortSignalPrototype, "AbortSignal");
       if (this[abortReason] !== undefined) {
         throw this[abortReason];
       }
@@ -942,16 +877,16 @@
     [signalSlot] = new AbortSignal(illegalConstructorKey);
 
     constructor() {
-      this[brand] = brand;
+      this[webidl.brand] = webidl.brand;
     }
 
     get signal() {
-      assertBranded(this, AbortControllerPrototype);
+      webidl.assertBranded(this, AbortControllerPrototype, "AbortController");
       return this[signalSlot];
     }
 
     abort(reason) {
-      assertBranded(this, AbortControllerPrototype);
+      webidl.assertBranded(this, AbortControllerPrototype, "AbortController");
       this[signalSlot][signalAbort](reason);
     }
   }

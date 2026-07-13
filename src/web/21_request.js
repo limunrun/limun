@@ -33,13 +33,17 @@
 // Ports Deno's `ext/fetch/23_request.js`, simplified (no streaming body,
 // no CORS mode/credentials, no `mode` field) to match the previous Rust
 // surface:
-//   - `webidl.brand`/`assertBranded`  → inline (09_blob.js pattern).
+//   - `webidl.brand`/`assertBranded`  → `globalThis.__bootstrap.webidl`
+//     (shared `ext:limun/00_webidl.js`). The body-mixin callback uses a
+//     2-arg adapter that wraps `webidl.assertBranded` with
+//     `interfaceName: "Request"`.
 //   - `webidl.converters.*`           → inline/`String()` coercion.
 //   - Body mixin                      → `19_body.js`'s `mixinBody`.
 //   - `[SymbolFor("Deno.privateCustomInspect")]` → dropped.
 
 ((globalThis) => {
   const { primordials } = globalThis.__bootstrap;
+  const webidl = globalThis.__bootstrap.webidl;
   const {
     ObjectCreate,
     ObjectDefineProperty,
@@ -54,18 +58,6 @@
     globalThis.__bootstrap.headers;
   const { coerceBodyInit, createBodyState, cloneBodyState, mixinBody } =
     globalThis.__bootstrap.body;
-
-  // --- Inline WebIDL (minimal, pilot-scoped) -----------------------------
-
-  const brand = Symbol("[[webidl.brand]]");
-
-  function assertBranded(self, prototype) {
-    if (
-      !ObjectPrototypeIsPrototypeOf(prototype, self) || self[brand] !== brand
-    ) {
-      throw new TypeError("Illegal invocation");
-    }
-  }
 
   // --- Private fields ------------------------------------------------------
 
@@ -151,7 +143,7 @@
         );
       }
 
-      this[brand] = brand;
+      this[webidl.brand] = webidl.brand;
       this[_method] = method;
       this[_url] = url;
       this[_headers] = createHeaders(headerPairs);
@@ -160,27 +152,27 @@
     }
 
     get method() {
-      assertBranded(this, RequestPrototype);
+      webidl.assertBranded(this, RequestPrototype, "Request");
       return this[_method];
     }
 
     get url() {
-      assertBranded(this, RequestPrototype);
+      webidl.assertBranded(this, RequestPrototype, "Request");
       return this[_url];
     }
 
     get headers() {
-      assertBranded(this, RequestPrototype);
+      webidl.assertBranded(this, RequestPrototype, "Request");
       return this[_headers];
     }
 
     get signal() {
-      assertBranded(this, RequestPrototype);
+      webidl.assertBranded(this, RequestPrototype, "Request");
       return this[_signal];
     }
 
     clone() {
-      assertBranded(this, RequestPrototype);
+      webidl.assertBranded(this, RequestPrototype, "Request");
       // Spec: "If this is disturbed or locked, throw a TypeError" —
       // checked (and throws) before anything else is touched.
       const clonedBody = cloneBodyState(this[_bodyState]);
@@ -206,6 +198,14 @@
   });
   const RequestPrototype = Request.prototype;
 
+  // `mixinBody` (19_body.js) calls `assertBranded(this, prototype)` with
+  // two args; `webidl.assertBranded` takes an optional 3rd `interfaceName`
+  // (undefined → "Illegal invocation"). Bind it so the body mixin's
+  // 2-arg call site gets the spec-correct message for `Request`.
+  function assertBranded(self, prototype) {
+    return webidl.assertBranded(self, prototype, "Request");
+  }
+
   mixinBody(
     RequestPrototype,
     _bodyState,
@@ -218,7 +218,7 @@
    * by `clone()`). */
   function newRequestInstance(method, url, headers, bodyState, signal) {
     const r = ObjectCreate(RequestPrototype);
-    r[brand] = brand;
+    r[webidl.brand] = webidl.brand;
     r[_method] = method;
     r[_url] = url;
     r[_headers] = headers;
