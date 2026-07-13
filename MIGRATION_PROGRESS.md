@@ -53,9 +53,9 @@ progress across subagents and context compactions.
 - [x] prompt (JS port, 4 ops: op_prompt_is_tty/alert/confirm/prompt)
 - [x] event (Event/CustomEvent/EventTarget/AbortController/AbortSignal) — 459/459, bugs #1 and #3 fixed
 - [x] url / url_search_params (JS port, 6 handle-based ops, 61 smoke tests)
-- [ ] fetch/* (fetch, Headers, Response, Request)
-- [ ] blob / form_data
 - [x] streams (JS port, start-only; Rust bridge for blob/fetch stream creation)
+- [x] blob / form_data (JS port, no ops; Rust bridges for fetch; 293 new FileAPI WPT tests added)
+- [ ] fetch/* (fetch, Headers, Response, Request)
 
 ## Core verification
 - [ ] Verify src/core/ (event loop, module/resolver, permissions, io, exceptions, rejections)

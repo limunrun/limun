@@ -102,13 +102,17 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     // (`createFixedReadableStream`) — same pattern as `DOMException`'s
     // `new_instance`.
     //
-    // `blob`/`form_data` (below) build on the streams surface.
-
-    // File API + XHR Standard — `Blob`/`FormData` (interface objects,
-    // non-enumerable). `Blob` is used by `Response.blob()`; `FormData` by
-    // `Response.formData()`.
-    blob::install(scope, global);
-    form_data::install(scope, global);
+    // File API + XHR Standard — `Blob`/`File`/`FormData` (interface
+    // objects, non-enumerable). Installed by the JS modules
+    // `ext:limun/09_blob.js` / `ext:limun/10_form_data.js` during
+    // bootstrap (real constructible classes). The JS layers own the
+    // spec surface (Blob/File/FormData classes, brand checks,
+    // BlobPart/entry conversion, slice/text/arrayBuffer/stream, multipart
+    // + urlencoded parsing); the Rust side (`web::blob::new_blob_instance`
+    // / `web::form_data::new_instance`) is only a thin bridge so
+    // `Response.blob()` / `Request.blob()` / `Response.formData()` /
+    // `Request.formData()` can mint instances by calling the cached JS
+    // factories (`createBlob`/`createFormData`).
 
     // DOM Standard — `Event`/`CustomEvent`/`EventTarget`/
     // `AbortController`/`AbortSignal` (interface objects, non-enumerable).

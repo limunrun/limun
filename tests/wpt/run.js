@@ -50,6 +50,37 @@ async function loadScript(relPath) {
   (0, eval)(mod.default);
 }
 
+// `// META: script=<path>` directives in a WPT `.any.js` file name
+// preamble scripts that must be loaded (in order, in the same global
+// scope) *before* the test file itself — they define helpers the test
+// file calls (`test_blob`, `abortSignalAnyTests`, …). The path is
+// resolved relative to the test file's directory (matching the WPT
+// convention). Extracted from comment lines at the top of the file.
+const META_SCRIPT_PATTERN = /^\/\/\s*META:\s*script=(.+?)\s*$/gm;
+async function loadAnyJs(relPath) {
+  const fileUrl = new URL(relPath, here);
+  const mod = await import(fileUrl.href, { with: { type: "text" } });
+  const src = mod.default;
+  currentScriptUrl = fileUrl.href;
+  // Resolve + load any `META: script=` preamble files first, in order,
+  // in the same global scope (indirect eval). The regex is global so we
+  // collect every match; the path is relative to the test file's dir.
+  let match;
+  const re = new RegExp(META_SCRIPT_PATTERN);
+  while ((match = re.exec(src)) !== null) {
+    const preamblePath = match[1];
+    const preambleUrl = new URL(preamblePath, fileUrl);
+    // Normalize relative to `here` (the run.js dir) so the import
+    // specifier points back into the vendored suite.
+    const rel = preambleUrl.href.slice(here.href.length);
+    await loadScript(`./${rel}`);
+    // Restore the current script URL so `fetch_json` resolution still
+    // points at the test file, not the preamble.
+    currentScriptUrl = fileUrl.href;
+  }
+  (0, eval)(src);
+}
+
 let currentScriptUrl = here.href;
 await loadScript("./suite/resources/testharness.js");
 await loadScript("./testharnessreport.js");
@@ -91,6 +122,14 @@ const defaultFiles = [
   "dom/abort/timeout.any.js",
   "dom/abort/AbortSignal.any.js",
   "html/webappapis/atob/base64.any.js",
+  "FileAPI/support/Blob.js",
+  "FileAPI/blob/Blob-text.any.js",
+  "FileAPI/blob/Blob-array-buffer.any.js",
+  "FileAPI/blob/Blob-bytes.any.js",
+  "FileAPI/blob/Blob-slice.any.js",
+  "FileAPI/blob/Blob-slice-overflow.any.js",
+  "FileAPI/blob/Blob-constructor.any.js",
+  "FileAPI/file/File-constructor.any.js",
 ];
 
 // When --suite=<name> is given, discover .any.js files under suite/<name>/.
@@ -116,7 +155,17 @@ if (suiteFilter) {
 
 for (const f of files) {
   console.log(`\n--- ${f} ---`);
-  await loadScript(`./suite/${f}`);
+  // `--suite=` flag still filters by prefix; load preamble-supporting
+  // `.any.js` files through `loadAnyJs` (handles `// META: script=`),
+  // plain files (testharness, report) through `loadScript`. The WPT
+  // support files (e.g. `FileAPI/support/Blob.js`) are not `.any.js`
+  // tests themselves — they're preamble targets loaded by their
+  // callers; load them with `loadScript` (no META handling needed).
+  if (f.endsWith(".any.js")) {
+    await loadAnyJs(`./suite/${f}`);
+  } else {
+    await loadScript(`./suite/${f}`);
+  }
 }
 
 globalThis.done = realDone;

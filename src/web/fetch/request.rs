@@ -353,7 +353,7 @@ fn blob_method(
         .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
-    let blob = blob::new_instance(scope, bytes, type_);
+    let blob = blob::new_blob_instance(scope, bytes, type_);
     resolve_with(scope, &mut rv, blob.into());
 }
 

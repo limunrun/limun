@@ -111,6 +111,23 @@ pub fn execute(isolate: &mut v8::Isolate, entry: &Url) -> ExitCode {
     // streams without a `globalThis` lookup.
     web::streams::cache_factory(tc);
 
+    // Cache the JS-defined `createBlob`/`createFile` factories for Rust
+    // callers (`Response.blob()` / `Request.blob()`). The factories were
+    // installed on `globalThis.__bootstrap` by `ext:limun/09_blob.js` in
+    // the loop above; stash `v8::Global`s so `blob::new_blob_instance`
+    // / `new_file_instance` can mint instances without a `globalThis`
+    // lookup.
+    web::blob::cache_factories(tc);
+
+    // Cache the JS-defined `createFormData` factory and the
+    // `formDataAppendUrlEncoded` / `formDataParseMultipart` parsers for
+    // Rust callers (`Response.formData()` / `Request.formData()`). The
+    // functions were installed on `globalThis.__bootstrap` by
+    // `ext:limun/10_form_data.js` in the loop above; stash `v8::Global`s
+    // so `form_data::new_instance` / `append_urlencoded` /
+    // `append_multipart` can run without `globalThis` lookups.
+    web::form_data::cache_factories(tc);
+
     // The entry point is always plain JS — import attributes only make
     // sense on an `import` statement/expression, and there's no such thing
     // for the script you hand to `limun` on the command line.
