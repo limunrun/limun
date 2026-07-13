@@ -1,5 +1,5 @@
 // Focused smoke test for the fetch module JS migration (Headers/
-// Request/Response/fetch — `src/js/{19_body,20_headers,21_request,
+// Request/Response/fetch — `src/web/{19_body,20_headers,21_request,
 // 22_response,23_fetch}.js`).
 //
 // Runs unattended; exits 0 if all checks pass. Real-network checks

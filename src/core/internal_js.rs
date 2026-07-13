@@ -52,79 +52,79 @@ pub struct InternalModule {
 pub static REGISTRY: &[InternalModule] = &[
     InternalModule {
         specifier: "ext:limun/00_primordials.js",
-        source: include_str!("../js/00_primordials.js"),
+        source: include_str!("00_primordials.js"),
     },
     InternalModule {
         specifier: "ext:limun/01_dom_exception.js",
-        source: include_str!("../js/01_dom_exception.js"),
+        source: include_str!("../web/01_dom_exception.js"),
     },
     InternalModule {
         specifier: "ext:limun/00_url.js",
-        source: include_str!("../js/00_url.js"),
+        source: include_str!("../web/00_url.js"),
     },
     InternalModule {
         specifier: "ext:limun/01_console.js",
-        source: include_str!("../js/01_console.js"),
+        source: include_str!("../web/01_console.js"),
     },
     InternalModule {
         specifier: "ext:limun/02_timers.js",
-        source: include_str!("../js/02_timers.js"),
+        source: include_str!("../web/02_timers.js"),
     },
     InternalModule {
         specifier: "ext:limun/02_event.js",
-        source: include_str!("../js/02_event.js"),
+        source: include_str!("../web/02_event.js"),
     },
     InternalModule {
         specifier: "ext:limun/05_base64.js",
-        source: include_str!("../js/05_base64.js"),
+        source: include_str!("../web/05_base64.js"),
     },
     InternalModule {
         specifier: "ext:limun/08_text_encoding.js",
-        source: include_str!("../js/08_text_encoding.js"),
+        source: include_str!("../web/08_text_encoding.js"),
     },
     InternalModule {
         specifier: "ext:limun/06_streams.js",
-        source: include_str!("../js/06_streams.js"),
+        source: include_str!("../web/06_streams.js"),
     },
     InternalModule {
         specifier: "ext:limun/09_blob.js",
-        source: include_str!("../js/09_blob.js"),
+        source: include_str!("../web/09_blob.js"),
     },
     InternalModule {
         specifier: "ext:limun/10_form_data.js",
-        source: include_str!("../js/10_form_data.js"),
+        source: include_str!("../web/10_form_data.js"),
     },
     InternalModule {
         specifier: "ext:limun/15_performance.js",
-        source: include_str!("../js/15_performance.js"),
+        source: include_str!("../web/15_performance.js"),
     },
     InternalModule {
         specifier: "ext:limun/19_body.js",
-        source: include_str!("../js/19_body.js"),
+        source: include_str!("../web/19_body.js"),
     },
     InternalModule {
         specifier: "ext:limun/20_headers.js",
-        source: include_str!("../js/20_headers.js"),
+        source: include_str!("../web/20_headers.js"),
     },
     InternalModule {
         specifier: "ext:limun/21_request.js",
-        source: include_str!("../js/21_request.js"),
+        source: include_str!("../web/21_request.js"),
     },
     InternalModule {
         specifier: "ext:limun/22_response.js",
-        source: include_str!("../js/22_response.js"),
+        source: include_str!("../web/22_response.js"),
     },
     InternalModule {
         specifier: "ext:limun/23_fetch.js",
-        source: include_str!("../js/23_fetch.js"),
+        source: include_str!("../web/23_fetch.js"),
     },
     InternalModule {
         specifier: "ext:limun/41_prompt.js",
-        source: include_str!("../js/41_prompt.js"),
+        source: include_str!("../web/41_prompt.js"),
     },
     InternalModule {
         specifier: "ext:limun/99_test.js",
-        source: include_str!("../js/99_test.js"),
+        source: include_str!("99_test.js"),
     },
 ];
 

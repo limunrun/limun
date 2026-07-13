@@ -13,7 +13,7 @@ progress across subagents and context compactions.
 - [x] Internal ESM loading — `src/core/internal_js.rs`, `ext:limun/` specifiers,
   static registry via `include_str!`, bypasses IO/permissions
 - [x] Op registration — `src/core/ops.rs`, `globalThis.__limunOps` flat object
-- [x] Primordials — `src/js/00_primordials.js` (Deno's, MIT), first module evaluated
+- [x] Primordials — `src/core/00_primordials.js` (Deno's, MIT), first module evaluated
 - [x] Ext bootstrap ordering — registry order in `src/core/mod.rs` execute()
 - [x] Proof test — `tests/infra/proof.js` asserts `__infraProof === "HELLO 5"`, passes
 
@@ -26,7 +26,7 @@ progress across subagents and context compactions.
 
 ## Phase 1 — Pilot: base64 ✅ DONE
 
-- [x] Port Deno's `05_base64.js` to `src/js/05_base64.js`
+- [x] Port Deno's `05_base64.js` to `src/web/05_base64.js`
 - [x] Add `op_base64_atob` / `op_base64_btoa` Rust ops in `src/core/ops.rs`
 - [x] Rewire: `__limunOps`, primordials, `globalThis.DOMException`
 - [x] Remove `src/web/base64.rs`, remove `set_fn` calls from `src/web/mod.rs`
@@ -56,7 +56,7 @@ progress across subagents and context compactions.
 - [x] streams (JS port, start-only; Rust bridge for blob/fetch stream creation)
 - [x] blob / form_data (JS port, no ops; 293 new FileAPI WPT tests added)
 - [x] fetch/* (fetch, Headers, Response, Request) — LAST module, all web APIs now JS-on-ops
-  - JS: `src/js/{19_body,20_headers,21_request,22_response,23_fetch}.js`
+  - JS: `src/web/{19_body,20_headers,21_request,22_response,23_fetch}.js`
   - One op: `op_fetch(method, url, headerPairs, body, signal) -> Promise` — permission check,
     tokio spawn, AbortSignal cancellation trampoline all stay in Rust (`src/web/fetch/mod.rs`,
     reduced to transport only). `event_loop::resolve_fetch` settles with a flat result object
@@ -69,7 +69,7 @@ progress across subagents and context compactions.
 **ALL WEB MODULES MIGRATED.** `src/web/` is now: `fetch/mod.rs` (transport op only),
 `dom_exception.rs`/`performance.rs`/`streams.rs`(deleted)/`blob.rs`(deleted)/`form_data.rs`(deleted)
 bridges reduced or removed, `mod.rs` (global install wiring only). All spec-observable
-behavior lives in `src/js/`.
+behavior lives in `src/web/`.
 
 ## Core verification ✅ DONE
 
@@ -80,7 +80,7 @@ event loop (bridge channel dispatch, microtask checkpoints, teardown ordering),
 module system (static/dynamic import, JSON/text attributes, `ext:` routing, SRI),
 permissions (glob matcher, deny/allow/default semantics, single choke point
 confirmed), exception/rejection reporting, `ops.rs` (1214 lines, no dead ops, no
-duplicates, every op called from `src/js/`), `internal_js.rs` registry order (no
+duplicates, every op called from `src/web/`), `internal_js.rs` registry order (no
 dependency violations — modules mutate `globalThis` directly, evaluated in
 registry order, no cross-module static imports).
 
@@ -107,12 +107,23 @@ WPT 752/753 (1 pre-existing MessageChannel gap, unrelated to core).
 - `tests/unit/smoke_test.js` referenced the old non-spec `ReadableStreamReader` global
   (dropped by the streams migration in favor of the spec-correct `ReadableStreamDefaultReader`)
   — fixed to use the correct name.
-- `src/js/06_streams.js`'s `enqueue()` didn't coerce string chunks to UTF-8 bytes, a
+- `src/web/06_streams.js`'s `enqueue()` didn't coerce string chunks to UTF-8 bytes, a
   documented simplification the old Rust streams.rs had ("Chunks are byte slices...
   string on enqueue"). Restored via `coerceChunk()` since Limun's streams are only ever
   byte streams in practice (Response.body/Request.body/Blob.stream()).
 - `WEAK_HANDLES` in `src/core/state.rs` is now dead (its only pusher, `web::native::store`,
   is deleted) — left as infrastructure for a future native class, doc comment updated.
+
+## Post-migration cleanup — Item 1: Layout fix ✅ DONE
+
+The flat `src/js/` directory is gone. Internal JS is colocated with its Rust:
+- web-surface modules (17) → `src/web/*.js` (flat, next to `fetch/`, `mod.rs`, etc.)
+- runtime infra (primordials, test harness) → `src/core/*.js` (next to `internal_js.rs`, `ops.rs`)
+- `include_str!` paths in `src/core/internal_js.rs` updated; `ext:limun/…` specifiers and
+  REGISTRY bootstrap order UNCHANGED.
+- Verified by independent verifier: `src/js/` absent, no `src/js/` or `../js/` references
+  remain, build clean 0 warnings, WPT 752/753, all unit/infra tests pass, git diff is pure
+  renames + path-string swaps (no logic change).
 
 ## Notes
 - Build: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo build`
