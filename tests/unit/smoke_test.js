@@ -910,7 +910,9 @@ console.group("ReadableStream / ReadableStreamDefaultReader (WHATWG Streams Stan
   await r4.read(); // will resolve when close fires
   check("read() resolves after async close", true);
 
-  // String chunks (non-BufferSource) are coerced to UTF-8 bytes.
+  // String chunks pass through unchanged (spec: default-controller enqueue
+  // accepts any value; Limun's byte-stream coercion is applied only by the
+  // Rust bridge's `createFixedReadableStream`, not the public enqueue).
   const s5 = new ReadableStream({
     start(controller) {
       controller.enqueue("plain string chunk");
@@ -919,8 +921,7 @@ console.group("ReadableStream / ReadableStreamDefaultReader (WHATWG Streams Stan
   });
   const r5 = s5.getReader();
   const { value: v5 } = await r5.read();
-  check("string chunk coerced to Uint8Array", v5 instanceof Uint8Array);
-  check("string chunk round-trips", new TextDecoder().decode(v5) === "plain string chunk");
+  check("string chunk passes through unchanged", v5 === "plain string chunk");
 
   // Response.body on a user-constructed Response (no network).
   const res = new Response(new Uint8Array([1, 2, 3, 4]));

@@ -166,6 +166,48 @@ that had inline WebIDL copies (`00_url`, `01_dom_exception`, `02_event`,
 
 Verified: build clean 0 warnings, WPT 752/753, all unit/infra tests pass.
 
+## Post-migration cleanup — Item 3: Spec gaps (in progress)
+
+### 3a. Streams — full Streams Standard ✅ DONE
+
+Replaced the 880-line start-only subset (`src/web/06_streams.js`) with a 7118-line
+full port of Deno's `ext/web/06_streams.js`. Classes: `ReadableStream` (pull,
+cancel, backpressure, `static from`), `ReadableStreamDefaultReader`,
+`ReadableStreamBYOBReader`, `ReadableStreamBYOBRequest`,
+`ReadableStreamDefaultController`, `ReadableByteStreamController`,
+`WritableStream`, `WritableStreamDefaultWriter`, `WritableStreamDefaultController`,
+`TransformStream`, `TransformStreamDefaultController`, `ByteLengthQueuingStrategy`,
+`CountQueuingStrategy`, + 177 internal algorithms (pipeTo/pipeThrough/tee/async
+iteration/BYOB/byte streams). `createFixedReadableStream` preserved on
+`globalThis.__bootstrap` (consumed by `09_blob.js`/`19_body.js`/`22_response.js`).
+
+Deno machinery dropped: resource/rid ops (`op_readable_stream_resource_*`/
+`op_read_all`/`op_pipe`/`fastPipeTo`), `_resourceBacking`, custom-inspect
+(`[SymbolFor("Deno.privateCustomInspect")]`), transferable
+(`core.registerTransferableResource`/`*TransferSteps`), Node.js interop symbols,
+`core.refOpPromise`/`unrefOpPromise`, `core.tryClose`/`close`. `structuredClone`
+dep replaced with in-module `cloneChunk` (byte-copy for tee — full structured-clone
+is MessageChannel's task).
+
+`02_event.js` gained `globalThis.__bootstrap.abortSignal` surface
+(`{ AbortSignalPrototype, signalAbort, add, remove, newSignal }`) +
+`webidl.converters.AbortSignal` + `webidl.converters["sequence<AbortSignal>"]`
+for the Streams Standard's abort wiring.
+
+WPT: **1859/1868** (added 70 streams test files: readable-streams 14,
+readable-byte-streams 10, writable-streams 15, transform-streams 11,
+queuing-strategies 1, piping 13). 9 failures: 1 pre-existing MessageChannel +
+8 streams edge cases (5 ArrayBuffer `transfer()`/detach — structured-clone
+territory; 2 microtask-timing in `pipeTo` pump; 1 transform-cancel race).
+Build clean 0 warnings; all unit/infra tests pass.
+
+Deviations from Deno:
+- `coerceChunk` defined but NOT applied to public `enqueue` (WPT requires strings
+  pass through; old Limun byte-coercion kept only for `createFixedReadableStream`).
+- `cloneChunk` (byte-copy) replaces `structuredClone` in `tee`.
+- `assert` is in-module TypeError-thrower; `rethrowAssertionErrorRejection` no-op.
+- `fastPipeTo`/`op_pipe` dropped — `readableStreamPipeTo` pure-JS slow path.
+
 ## Notes
 - Build: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo build`
 - WPT: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo run -- tests/wpt/run.js`

@@ -693,6 +693,8 @@
 
   // Private slots (symbols) — same names as Deno for spec alignment.
   const signalAbort = Symbol("[[signalAbort]]");
+  const add = Symbol("[[add]]");
+  const remove = Symbol("[[remove]]");
   const runAbortSteps = Symbol("[[runAbortSteps]]");
   const abortReason = Symbol("[[abortReason]]");
   const abortAlgos = Symbol("[[abortAlgos]]");
@@ -834,6 +836,37 @@
         // override in this impl — but using the prototype method is
         // explicit and matches Deno's `super.dispatchEvent`).
         EventTargetPrototype.dispatchEvent.call(this, event);
+      }
+    }
+
+    // `[add]`/`[remove]` — internal abort-algorithm registration used by
+    // the Streams Standard (`pipeTo`'s abort wiring, `WritableStream`'s
+    // abort). `[add](algorithm)` registers a one-shot algorithm that runs
+    // when the signal aborts (no-op if already aborted); `[remove]`
+    // detaches it. Matches Deno's `03_abort_signal.js` symbol-keyed
+    // methods. Stored as a plain Array (not a Set) so we don't need the
+    // `SetPrototypeAdd`/`SetPrototypeDelete` primordials; abort-algorithm
+    // lists are tiny so the linear scan is fine.
+    [add](algorithm) {
+      if (this[abortReason] !== undefined) {
+        return;
+      }
+      if (this[abortAlgos] === null) {
+        this[abortAlgos] = [];
+      }
+      ArrayPrototypePush(this[abortAlgos], algorithm);
+    }
+
+    [remove](algorithm) {
+      const algos = this[abortAlgos];
+      if (algos === null) {
+        return;
+      }
+      for (let i = 0; i < algos.length; ++i) {
+        if (algos[i] === algorithm) {
+          ArrayPrototypeSplice(algos, i, 1);
+          return;
+        }
       }
     }
 
@@ -1006,4 +1039,28 @@
   installGlobal("EventTarget", EventTarget);
   installGlobal("AbortSignal", AbortSignal);
   installGlobal("AbortController", AbortController);
+
+  // `webidl.converters.AbortSignal` — interface converter used by the
+  // Streams Standard (`StreamPipeOptions.signal`, `pipeTo`). Registered
+  // here (where `AbortSignal` is defined) rather than in `00_webidl.js`
+  // (which can't reference an interface defined in a later module).
+  // Matches Deno's `03_abort_signal.js` placement.
+  webidl.converters.AbortSignal = webidl.createInterfaceConverter(
+    "AbortSignal",
+    AbortSignalPrototype,
+  );
+  webidl.converters["sequence<AbortSignal>"] = webidl.createSequenceConverter(
+    webidl.converters.AbortSignal,
+  );
+
+  // Expose the internal abort-signal surface the Streams Standard needs
+  // (`pipeTo`'s abort wiring, `WritableStream`'s controller signal). These
+  // are not part of the public web API — only consumed by `06_streams.js`.
+  globalThis.__bootstrap.abortSignal = {
+    AbortSignalPrototype,
+    signalAbort,
+    add,
+    remove,
+    newSignal: () => new AbortSignal(illegalConstructorKey),
+  };
 })(globalThis);

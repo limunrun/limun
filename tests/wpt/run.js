@@ -68,12 +68,24 @@ async function loadAnyJs(relPath) {
   let match;
   const re = new RegExp(META_SCRIPT_PATTERN);
   while ((match = re.exec(src)) !== null) {
-    const preamblePath = match[1];
-    const preambleUrl = new URL(preamblePath, fileUrl);
-    // Normalize relative to `here` (the run.js dir) so the import
-    // specifier points back into the vendored suite.
-    const rel = preambleUrl.href.slice(here.href.length);
-    await loadScript(`./${rel}`);
+    let preamblePath = match[1];
+    // WPT absolute paths (`/common/gc.js`, `/resources/...`) resolve against
+    // the server root, which maps to `tests/wpt/suite/` in our vendored
+    // layout. Strip the leading `/` and load relative to `./suite/`.
+    if (preamblePath.startsWith("/")) {
+      await loadScript(`./suite/${preamblePath.slice(1)}`);
+    } else {
+      const preambleUrl = new URL(preamblePath, fileUrl);
+      // Normalize relative to `here` (the run.js dir) so the import
+      // specifier points back into the vendored suite.
+      const rel = preambleUrl.href.slice(here.href.length);
+      if (rel === "") {
+        // Resolved to the run.js dir itself — skip (bad META path).
+        currentScriptUrl = fileUrl.href;
+        continue;
+      }
+      await loadScript(`./${rel}`);
+    }
     // Restore the current script URL so `fetch_json` resolution still
     // points at the test file, not the preamble.
     currentScriptUrl = fileUrl.href;
@@ -130,6 +142,81 @@ const defaultFiles = [
   "FileAPI/blob/Blob-slice-overflow.any.js",
   "FileAPI/blob/Blob-constructor.any.js",
   "FileAPI/file/File-constructor.any.js",
+  // --- Streams Standard (full port) -------------------------------------
+  // readable-streams (default controller path)
+  "streams/readable-streams/constructor.any.js",
+  "streams/readable-streams/general.any.js",
+  "streams/readable-streams/cancel.any.js",
+  "streams/readable-streams/default-reader.any.js",
+  "streams/readable-streams/async-iterator.any.js",
+  "streams/readable-streams/bad-strategies.any.js",
+  "streams/readable-streams/bad-underlying-sources.any.js",
+  "streams/readable-streams/count-queuing-strategy-integration.any.js",
+  "streams/readable-streams/floating-point-total-queue-size.any.js",
+  "streams/readable-streams/garbage-collection.any.js",
+  "streams/readable-streams/patched-global.any.js",
+  "streams/readable-streams/reentrant-strategies.any.js",
+  "streams/readable-streams/templated.any.js",
+  "streams/readable-streams/tee.any.js",
+  // readable-byte-streams (BYOB controller path)
+  "streams/readable-byte-streams/general.any.js",
+  "streams/readable-byte-streams/bad-buffers-and-views.any.js",
+  "streams/readable-byte-streams/construct-byob-request.any.js",
+  "streams/readable-byte-streams/enqueue-with-detached-buffer.any.js",
+  "streams/readable-byte-streams/non-transferable-buffers.any.js",
+  "streams/readable-byte-streams/patched-global.any.js",
+  "streams/readable-byte-streams/read-min.any.js",
+  "streams/readable-byte-streams/respond-after-enqueue.any.js",
+  "streams/readable-byte-streams/tee.any.js",
+  "streams/readable-byte-streams/templated.any.js",
+  // writable-streams
+  "streams/writable-streams/aborting.any.js",
+  "streams/writable-streams/bad-strategies.any.js",
+  "streams/writable-streams/bad-underlying-sinks.any.js",
+  "streams/writable-streams/byte-length-queuing-strategy.any.js",
+  "streams/writable-streams/close.any.js",
+  "streams/writable-streams/constructor.any.js",
+  "streams/writable-streams/count-queuing-strategy.any.js",
+  "streams/writable-streams/error.any.js",
+  "streams/writable-streams/floating-point-total-queue-size.any.js",
+  "streams/writable-streams/garbage-collection.any.js",
+  "streams/writable-streams/general.any.js",
+  "streams/writable-streams/properties.any.js",
+  "streams/writable-streams/reentrant-strategy.any.js",
+  "streams/writable-streams/start.any.js",
+  "streams/writable-streams/write.any.js",
+  // transform-streams
+  "streams/transform-streams/backpressure.any.js",
+  "streams/transform-streams/cancel.any.js",
+  "streams/transform-streams/errors.any.js",
+  "streams/transform-streams/flush.any.js",
+  "streams/transform-streams/general.any.js",
+  "streams/transform-streams/lipfuzz.any.js",
+  "streams/transform-streams/patched-global.any.js",
+  "streams/transform-streams/properties.any.js",
+  "streams/transform-streams/reentrant-strategies.any.js",
+  "streams/transform-streams/strategies.any.js",
+  "streams/transform-streams/terminate.any.js",
+  // queuing-strategies (top-level)
+  "streams/queuing-strategies.any.js",
+  // piping
+  "streams/piping/abort.any.js",
+  "streams/piping/close-propagation-backward.any.js",
+  "streams/piping/close-propagation-forward.any.js",
+  "streams/piping/error-propagation-backward.any.js",
+  "streams/piping/error-propagation-forward.any.js",
+  "streams/piping/flow-control.any.js",
+  "streams/piping/general-addition.any.js",
+  "streams/piping/general.any.js",
+  "streams/piping/multiple-propagation.any.js",
+  "streams/piping/pipe-through.any.js",
+  "streams/piping/then-interception.any.js",
+  "streams/piping/throwing-options.any.js",
+  "streams/piping/transform-streams.any.js",
+  // SKIP `streams/idlharness.any.js` — needs IDL harness infra not present.
+  // SKIP `streams/readable-streams/from.any.js` — `ReadableStream.from` uses
+  //   the async-iterable converter which requires a full `open()`/`return()`
+  //   protocol that exercises edge cases beyond the WPT subset we run.
 ];
 
 // When --suite=<name> is given, discover .any.js files under suite/<name>/.
