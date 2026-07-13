@@ -49,8 +49,9 @@ progress across subagents and context compactions.
 - [x] text_encoding (JS port + 6 ops, bug #2 fixed)
 - [x] console (JS port, 1 op: op_print)
 - [x] timers (JS port, 3 ops: op_timer_schedule/clear/queue_microtask)
+- [x] performance (JS port, 2 ops: op_now/op_time_origin; EventTarget stubbed)
+- [x] prompt (JS port, 4 ops: op_prompt_is_tty/alert/confirm/prompt)
 - [ ] event (Event/EventTarget/AbortController/AbortSignal)
-- [ ] performance (HR Time)
 - [ ] text_encoding (TextEncoder/TextDecoder)
 - [ ] url / url_search_params
 - [ ] timers

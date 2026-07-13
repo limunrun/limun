@@ -21,6 +21,7 @@
 use base64::Engine as _;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io::{IsTerminal, Write};
 
 use crate::core::event_loop;
 
@@ -45,6 +46,12 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     set_fn(scope, ops, "op_timer_schedule", op_timer_schedule);
     set_fn(scope, ops, "op_timer_clear", op_timer_clear);
     set_fn(scope, ops, "op_queue_microtask", op_queue_microtask);
+    set_fn(scope, ops, "op_now", op_now);
+    set_fn(scope, ops, "op_time_origin", op_time_origin);
+    set_fn(scope, ops, "op_prompt_alert", op_prompt_alert);
+    set_fn(scope, ops, "op_prompt_confirm", op_prompt_confirm);
+    set_fn(scope, ops, "op_prompt_prompt", op_prompt_prompt);
+    set_fn(scope, ops, "op_prompt_is_tty", op_prompt_is_tty);
 
     crate::web::set_global(scope, global, "__limunOps", ops.into());
 }
@@ -626,4 +633,144 @@ fn op_queue_microtask(
         scope.enqueue_microtask(callback);
     }
     rv.set(v8::undefined(scope).into());
+}
+
+// --- High Resolution Time ops ----------------------------------------------
+//
+// W3C HR Time L3 `performance.now()`/`performance.timeOrigin` backing ops.
+// The spec surface (the `performance` singleton, the `Performance`
+// interface shape, `toJSON`) lives in `ext:limun/15_performance.js`; these
+// ops are flat clock reads — the irreducible native work (accessing the
+// monotonic + wall clocks). The clock anchors themselves live in
+// `web::performance` (shared with `web::event` for `Event.timeStamp`, which
+// calls `performance::now_value()` directly — Rust→Rust, no op round-trip).
+
+/// `op_now() -> f64` — monotonic milliseconds since the time origin
+/// (first clock access). Backs `performance.now()`. Never decreases
+/// (monotonic clock, immune to system-clock adjustments). Per spec §7.1
+/// returns a `DOMHighResTimeStamp` (a duration from the time origin).
+fn op_now(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    rv.set(v8::Number::new(scope, crate::web::performance::now_value()).into());
+}
+
+/// `op_time_origin() -> f64` — Unix-epoch wall-clock milliseconds at the
+/// time origin. Backs `performance.timeOrigin`. Stable across reads (spec
+/// §7.2 — the same value every call; the anchor is captured once).
+fn op_time_origin(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    rv.set(v8::Number::new(scope, crate::web::performance::time_origin_value()).into());
+}
+
+// --- User-prompt ops -------------------------------------------------------
+//
+// WHATWG HTML user-prompt globals (`alert`/`confirm`/`prompt`) backing ops.
+// The spec surface (argument coercion, default values, return shaping) lives
+// in `ext:limun/41_prompt.js`; these ops are the irreducible native work:
+// writing the prompt to stderr, reading a line from stdin, returning the
+// raw answer. The JS layer decides whether stdin is a terminal (non-TTY
+// → no-op/false/null) by calling `op_prompt_is_tty` once at module load.
+//
+// Models after the previous Rust `web::prompt` module (now removed): stderr
+// for prompt text so it doesn't pollute stdout pipelines; stdin `read_line`
+// for the answer; EOF or read error → empty string (treated as no input).
+
+/// `op_prompt_is_tty() -> bool` — returns `true` if stdin is a terminal.
+/// Called once at module load to cache the answer (matches the previous
+/// Rust behavior, which checked `stdin().is_terminal()` at each call — but
+/// the answer is stable for the process lifetime, so caching is safe).
+fn op_prompt_is_tty(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    rv.set(v8::Boolean::new(scope, std::io::stdin().is_terminal()).into());
+}
+
+/// `op_prompt_alert(message: String) -> undefined` — writes `message + "
+/// [Enter] "` to stderr (no trailing newline — the prompt sits on the same
+/// line as the user's Enter), blocks for one line of stdin. The JS layer
+/// guards with the TTY check before calling; the op just does the IO.
+fn op_prompt_alert(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let message = args.get(0).to_rust_string_lossy(scope);
+    let line = format!("{message} [Enter] ");
+    let _ = write_err(&line);
+    let _ = read_line();
+    rv.set(v8::undefined(scope).into());
+}
+
+/// `op_prompt_confirm(message: String) -> bool` — writes `message + " [y/N]
+/// "` to stderr, reads one line, returns `true` only if the trimmed answer
+/// is exactly `y` or `Y`. The JS layer guards with the TTY check.
+fn op_prompt_confirm(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let message = args.get(0).to_rust_string_lossy(scope);
+    let line = format!("{message} [y/N] ");
+    let _ = write_err(&line);
+    let answer = read_line().unwrap_or_default();
+    let yes = answer.trim() == "y" || answer.trim() == "Y";
+    rv.set(v8::Boolean::new(scope, yes).into());
+}
+
+/// `op_prompt_prompt(message: String, default: String) -> String|null` —
+/// writes `message` (already formatted with trailing space by JS) to
+/// stderr, reads one line. Empty input + non-empty `default` → returns
+/// `default`; otherwise returns the trimmed input; EOF → null. The JS
+/// layer guards with the TTY check and does argument coercion.
+fn op_prompt_prompt(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let message = args.get(0).to_rust_string_lossy(scope);
+    let default_value = args.get(1).to_rust_string_lossy(scope);
+    let _ = write_err(&message);
+    let input = match read_line() {
+        Some(s) => s,
+        None => {
+            rv.set(v8::null(scope).into());
+            return;
+        }
+    };
+    let trimmed = input.trim_end_matches(['\n', '\r']);
+    let result = if trimmed.is_empty() && args.length() > 1 {
+        default_value
+    } else {
+        trimmed.to_string()
+    };
+    rv.set(v8::String::new(scope, &result).unwrap().into());
+}
+
+/// Write `text` to stderr and flush. Returns `Err` on IO failure (the
+/// caller ignores it — a failed prompt is a best-effort no-op, matching the
+/// previous Rust behavior).
+fn write_err(text: &str) -> std::io::Result<()> {
+    let mut stderr = std::io::stderr().lock();
+    stderr.write_all(text.as_bytes())?;
+    stderr.flush()?;
+    Ok(())
+}
+
+/// Read one line from stdin. Returns `None` on EOF or read error (matches
+/// the previous Rust `wait_for_line`).
+fn read_line() -> Option<String> {
+    let mut buf = String::new();
+    match std::io::stdin().read_line(&mut buf) {
+        Ok(0) => None,
+        Ok(_) => Some(buf),
+        Err(_) => None,
+    }
 }

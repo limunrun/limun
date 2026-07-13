@@ -69,6 +69,14 @@ pub static REGISTRY: &[InternalModule] = &[
         source: include_str!("../js/08_text_encoding.js"),
     },
     InternalModule {
+        specifier: "ext:limun/15_performance.js",
+        source: include_str!("../js/15_performance.js"),
+    },
+    InternalModule {
+        specifier: "ext:limun/41_prompt.js",
+        source: include_str!("../js/41_prompt.js"),
+    },
+    InternalModule {
         specifier: "ext:limun/99_test.js",
         source: include_str!("../js/99_test.js"),
     },

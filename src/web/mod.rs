@@ -12,7 +12,6 @@ pub mod fetch;
 pub mod form_data;
 mod native;
 pub mod performance;
-pub mod prompt;
 pub mod streams;
 pub mod url;
 pub mod url_search_params;
@@ -36,11 +35,12 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     // table, timer/count state); the flat Rust op `op_print` (registered
     // in `core::ops`) is the irreducible stdout/stderr write.
 
-    // User-prompt globals (alert/confirm/prompt) — ordinary interface
-    // attributes, enumerable per Web IDL §3.7.3 (same bucket as `self`).
-    set_fn(scope, global, "alert", prompt::alert);
-    set_fn(scope, global, "confirm", prompt::confirm);
-    set_fn(scope, global, "prompt", prompt::prompt);
+    // User-prompt globals (alert/confirm/prompt) — installed by the JS
+    // module `ext:limun/41_prompt.js` during bootstrap (plain operations,
+    // enumerable per Web IDL §3.7.3). The JS layer owns the spec surface
+    // (argument coercion, TTY gating, return shaping); the flat Rust ops
+    // (`op_prompt_alert`, `op_prompt_confirm`, `op_prompt_prompt`,
+    // `op_prompt_is_tty`) live in `core::ops`.
 
     // Timers (WHATWG HTML) — installed by the JS module
     // `ext:limun/02_timers.js` during bootstrap (plain operations,
@@ -98,18 +98,14 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
 
     // DOM Standard — `Event`/`CustomEvent`/`EventTarget`/
     // `AbortController`/`AbortSignal` (interface objects, non-enumerable).
-    // Installed before `performance` because `performance` is constructed
-    // via the `EventTarget` machinery (`Performance : EventTarget`).
     event::install(scope, global);
 
-    // High Resolution Time L3 — `performance` is a `[Replaceable]
-    // readonly attribute` on `WindowOrWorkerGlobalScope`, installed as
-    // an ordinary enumerable own property (verified shape in browsers:
-    // writable/configurable/enumerable all true). `Performance` extends
-    // `EventTarget`, so the singleton is built on top of the
-    // `EventTarget` machinery + the three spec members
-    // (`now`/`timeOrigin`/`toJSON`) as own properties.
-    performance::install(scope, global);
+    // High Resolution Time L3 — `performance` is installed by the JS module
+    // `ext:limun/15_performance.js` during bootstrap (an enumerable own
+    // property on `globalThis`, matching browsers). The flat Rust ops
+    // (`op_now`, `op_time_origin`) live in `core::ops`; the clock anchors
+    // (`now_value`/`time_origin_value`, also used by `web::event` for
+    // `Event.timeStamp`) live in `web::performance`.
 }
 
 /// Install a platform global the way real engines do — own, writable,
@@ -124,18 +120,6 @@ pub fn set_global(
 ) {
     let key = v8::String::new(scope, name).unwrap();
     target.define_own_property(scope, key.into(), value, v8::PropertyAttribute::DONT_ENUM);
-}
-
-/// Helper: attach a native function to an object under `name`.
-fn set_fn(
-    scope: &mut v8::PinScope,
-    target: v8::Local<v8::Object>,
-    name: &str,
-    callback: impl v8::MapFnTo<v8::FunctionCallback>,
-) {
-    let key = v8::String::new(scope, name).unwrap();
-    let func = v8::Function::new(scope, callback).unwrap();
-    target.set(scope, key.into(), func.into());
 }
 
 pub fn throw_type_error(scope: &mut v8::PinScope, message: &str) {

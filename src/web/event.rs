@@ -1467,9 +1467,15 @@ fn new_signal_instance<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8
     })
 }
 
-/// Mint a fresh `EventTarget` instance via the cached template. Used by
-/// `web::performance` to construct the `performance` singleton on top
-/// of the `EventTarget` machinery (`Performance : EventTarget`).
+/// Mint a fresh `EventTarget` instance via the cached template. Currently
+/// unused — `web::performance` used to call this to construct the
+/// `performance` singleton on top of the `EventTarget` machinery
+/// (`Performance : EventTarget`), but that migration moved the singleton
+/// to JS (`ext:limun/15_performance.js`) as a plain object with stub
+/// EventTarget methods. Retained for the future EventTarget-to-JS migration
+/// (an `op_create_event_target` op would call this) and gated with
+/// `#[allow(dead_code)]` so the dead-code warning stays quiet until then.
+#[allow(dead_code)]
 pub fn new_event_target_instance<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Object> {
     EVENT_TARGET_TMPL.with(|c| {
         let tmpl_global = c.borrow().as_ref().unwrap().clone();
