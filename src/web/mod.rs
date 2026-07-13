@@ -15,7 +15,6 @@ mod native;
 pub mod performance;
 pub mod prompt;
 pub mod streams;
-pub mod text_encoding;
 pub mod timers;
 pub mod url;
 pub mod url_search_params;
@@ -57,11 +56,16 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     let key = v8::String::new(scope, "self").unwrap();
     global.set(scope, key.into(), global.into());
 
-    // Encoding Standard — real constructible classes (interface objects),
-    // installed non-enumerable (verified against Node:
-    // `Object.getOwnPropertyDescriptor(globalThis, "TextEncoder").enumerable
-    // === false`).
-    text_encoding::install(scope, global);
+    // Encoding Standard — `TextEncoder`/`TextDecoder` installed by the JS
+    // module `ext:limun/08_text_encoding.js` during bootstrap (real
+    // constructible classes, non-enumerable — matches Node/Deno/browsers).
+    // The JS layer owns the spec surface (label normalization fast-path,
+    // WebIDL argument validation, BOM/fatal/ignoreBOM option parsing,
+    // streaming state, error-type selection); the flat Rust ops
+    // (`op_encoding_normalize_label`, `op_encoding_decode_single`,
+    // `op_encoding_new_decoder`, `op_encoding_decode`,
+    // `op_encoding_decode_finish`, `op_encoding_encode_into`) live in
+    // `core::ops`.
 
     // `btoa`/`atob` — installed by the JS module `ext:limun/05_base64.js`
     // during bootstrap (plain operations, enumerable — verified against

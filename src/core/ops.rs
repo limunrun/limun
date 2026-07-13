@@ -19,6 +19,8 @@
 //! — but the contract is "internal APIs may change without notice").
 
 use base64::Engine as _;
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 /// Install the `__limunOps` namespace on `globalThis` with every registered
 /// op attached. Called once from `core::mod::execute`, before internal JS
@@ -31,6 +33,12 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     set_fn(scope, ops, "op_test_add", op_test_add);
     set_fn(scope, ops, "op_base64_atob", op_base64_atob);
     set_fn(scope, ops, "op_base64_btoa", op_base64_btoa);
+    set_fn(scope, ops, "op_encoding_normalize_label", op_encoding_normalize_label);
+    set_fn(scope, ops, "op_encoding_decode_single", op_encoding_decode_single);
+    set_fn(scope, ops, "op_encoding_new_decoder", op_encoding_new_decoder);
+    set_fn(scope, ops, "op_encoding_decode", op_encoding_decode);
+    set_fn(scope, ops, "op_encoding_decode_finish", op_encoding_decode_finish);
+    set_fn(scope, ops, "op_encoding_encode_into", op_encoding_encode_into);
 
     crate::web::set_global(scope, global, "__limunOps", ops.into());
 }
@@ -162,4 +170,346 @@ fn set_fn(
     let key = v8::String::new(scope, name).unwrap();
     let func = v8::Function::new(scope, callback).unwrap();
     target.set(scope, key.into(), func.into());
+}
+
+// --- Text Encoding ops -----------------------------------------------------
+//
+// WHATWG Encoding Standard `TextEncoder`/`TextDecoder` backing ops. The
+// spec surface (label normalization fast path, WebIDL argument validation,
+// BOM/fatal/ignoreBOM option parsing, streaming state, error-type
+// selection) lives in `ext:limun/08_text_encoding.js`. These ops are flat:
+// bytes/strings/numbers in, string/number out. Errors are bare
+// `TypeError`s; the JS layer catches and rethrows as the spec-correct
+// exception (TypeError for fatal decode, RangeError for bad label).
+//
+// Streaming decode uses a thread-local registry of `encoding_rs::Decoder`
+// handles: `op_encoding_new_decoder` allocates one and returns an integer
+// id; `op_encoding_decode` feeds bytes through it; the JS layer calls
+// `op_encoding_decode_finish` to drop the handle when a non-streaming
+// `decode()` finalizes a run (or drops it itself on GC — but JS explicitly
+// finalizes, matching Deno's `#handle = null` in the `finally` block).
+
+/// Per-handle streaming decoder state. `fatal` is stored here so the
+/// decode op doesn't need it passed every call (the JS layer knows it
+/// per-instance but the Rust handle owns the run's decode mode).
+struct StreamingDecoder {
+    decoder: encoding_rs::Decoder,
+    fatal: bool,
+}
+
+thread_local! {
+    /// Map of active streaming decoder handles. The u32 id is returned to
+    /// JS as a Number; JS holds it in a private field and passes it back to
+    /// `op_encoding_decode`. Cleared by `op_encoding_decode_finish` (or
+    /// leaks on process exit — same model as `WEAK_HANDLES`).
+    static DECODER_REGISTRY: RefCell<HashMap<u32, StreamingDecoder>> =
+        RefCell::new(HashMap::new());
+    /// Monotonic id generator for `DECODER_REGISTRY`.
+    static NEXT_DECODER_ID: RefCell<u32> = const { RefCell::new(1) };
+}
+
+fn alloc_decoder_id() -> u32 {
+    NEXT_DECODER_ID.with(|id| {
+        let mut id = id.borrow_mut();
+        let cur = *id;
+        *id = id.wrapping_add(1);
+        cur
+    })
+}
+
+/// Read bytes out of a JS value that's an `ArrayBufferView` or
+/// `ArrayBuffer` (a `BufferSource` per Web IDL). Returns `None` for
+/// anything else — the JS layer is expected to have validated the input
+/// shape already, so `None` here means a bug in JS, not a user error.
+/// Same helper as `web::native::read_buffer_source` but inlined here to
+/// keep `core::ops` self-contained.
+fn read_bytes(value: v8::Local<v8::Value>) -> Option<Vec<u8>> {
+    if let Ok(view) = <v8::Local<v8::ArrayBufferView>>::try_from(value) {
+        let mut bytes = vec![0u8; view.byte_length()];
+        view.copy_contents(&mut bytes);
+        return Some(bytes);
+    }
+    if let Ok(ab) = <v8::Local<v8::ArrayBuffer>>::try_from(value) {
+        let len = ab.byte_length();
+        let data = ab.data()?;
+        return Some(unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, len) }.to_vec());
+    }
+    None
+}
+
+/// `op_encoding_normalize_label(label: String) -> String` — resolves a
+/// WHATWG encoding label to its canonical lowercase name via
+/// `encoding_rs::Encoding::for_label_no_replacement`. Returns `None` (as
+/// a thrown TypeError) for unknown labels and the `replacement` encoding
+/// (and its aliases like `iso-2022-kr`), both of which the spec rejects
+/// with a `RangeError` — the JS layer catches the TypeError and rethrows
+/// as RangeError. `for_label_no_replacement` already does the spec's
+/// ASCII-case-insensitive + ASCII-whitespace-trim normalization, so we
+/// feed it the raw JS string bytes.
+fn op_encoding_normalize_label(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let label = args.get(0).to_rust_string_lossy(scope);
+    let Some(encoding) = encoding_rs::Encoding::for_label_no_replacement(label.as_bytes()) else {
+        let msg = v8::String::new(
+            scope,
+            &format!("TextDecoder: unsupported encoding label \"{label}\""),
+        ).unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    };
+    // encoding_rs returns canonical names in its own casing ("UTF-8",
+    // "Shift_JIS", "UTF-16LE"). The WHATWG canonical names are lowercase,
+    // which is what `TextDecoder.encoding` must expose.
+    let name = encoding.name().to_ascii_lowercase();
+    let s = v8::String::new(scope, &name).unwrap();
+    rv.set(s.into());
+}
+
+/// `op_encoding_decode_single(bytes: Uint8Array, encoding_name: String,
+/// fatal: bool, ignore_bom: bool) -> String` — one-shot decode (no
+/// streaming). Creates a fresh decoder, feeds all bytes with `last =
+/// true`, returns the decoded string. On `fatal: true` + malformed input,
+/// throws a TypeError (the JS layer surfaces it directly — TextDecoder's
+/// fatal mode throws TypeError per spec).
+fn op_encoding_decode_single(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let bytes = match read_bytes(args.get(0)) {
+        Some(b) => b,
+        None => Vec::new(),
+    };
+    let encoding_name = args.get(1).to_rust_string_lossy(scope);
+    let fatal = args.get(2).boolean_value(scope);
+    let ignore_bom = args.get(3).boolean_value(scope);
+
+    let Some(encoding) = encoding_rs::Encoding::for_label(encoding_name.as_bytes()) else {
+        let msg = v8::String::new(
+            scope,
+            &format!("decode: unsupported encoding \"{encoding_name}\""),
+        ).unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    };
+
+    let mut decoder = if ignore_bom {
+        encoding.new_decoder_without_bom_handling()
+    } else {
+        encoding.new_decoder_with_bom_removal()
+    };
+
+    let text: String = if fatal {
+        let cap = decoder
+            .max_utf8_buffer_length_without_replacement(bytes.len())
+            .unwrap_or(0);
+        let mut out = String::with_capacity(cap);
+        let (result, _read) = decoder.decode_to_string_without_replacement(&bytes, &mut out, true);
+        match result {
+            encoding_rs::DecoderResult::InputEmpty => out,
+            encoding_rs::DecoderResult::Malformed(_, _) => {
+                let msg = v8::String::new(
+                    scope,
+                    "decode: invalid byte sequence (fatal: true)",
+                ).unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+            encoding_rs::DecoderResult::OutputFull => {
+                let msg = v8::String::new(
+                    scope,
+                    "decode: output buffer too small (fatal: true)",
+                ).unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        }
+    } else {
+        let cap = decoder.max_utf8_buffer_length(bytes.len()).unwrap_or(0);
+        let mut out = String::with_capacity(cap);
+        let (_result, _read, _had_errors) = decoder.decode_to_string(&bytes, &mut out, true);
+        out
+    };
+
+    let s = v8::String::new(scope, &text).unwrap();
+    rv.set(s.into());
+}
+
+/// `op_encoding_new_decoder(encoding_name: String, fatal: bool,
+/// ignore_bom: bool) -> number` — allocate a streaming decoder handle,
+/// store it in the thread-local registry, return its integer id. The JS
+/// layer holds the id in a private field and passes it to
+/// `op_encoding_decode`.
+fn op_encoding_new_decoder(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let encoding_name = args.get(0).to_rust_string_lossy(scope);
+    let fatal = args.get(1).boolean_value(scope);
+    let ignore_bom = args.get(2).boolean_value(scope);
+
+    let Some(encoding) = encoding_rs::Encoding::for_label(encoding_name.as_bytes()) else {
+        let msg = v8::String::new(
+            scope,
+            &format!("decode: unsupported encoding \"{encoding_name}\""),
+        ).unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    };
+
+    let decoder = if ignore_bom {
+        encoding.new_decoder_without_bom_handling()
+    } else {
+        encoding.new_decoder_with_bom_removal()
+    };
+
+    let id = alloc_decoder_id();
+    DECODER_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(id, StreamingDecoder { decoder, fatal });
+    });
+
+    rv.set(v8::Number::new(scope, id as f64).into());
+}
+
+/// `op_encoding_decode(bytes: Uint8Array, handle_id: number,
+/// stream: bool) -> String` — feed `bytes` through the streaming decoder
+/// identified by `handle_id`. `stream: true` keeps the decoder alive for
+/// the next call (retains partial-sequence state); `stream: false`
+/// finalizes the run (flushes any trailing partial sequence as U+FFFD or
+/// a fatal TypeError). The JS layer drops the handle with
+/// `op_encoding_decode_finish` when a non-streaming `decode()` ends a
+/// run. On fatal error, the handle is dropped here (the run is over).
+fn op_encoding_decode(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let bytes = read_bytes(args.get(0)).unwrap_or_default();
+    let handle_id = args.get(1).integer_value(scope).unwrap_or(0) as u32;
+    let stream = args.get(2).boolean_value(scope);
+    let last = !stream;
+
+    let text: String = DECODER_REGISTRY.with(|reg| {
+        let mut reg = reg.borrow_mut();
+        let Some(entry) = reg.get_mut(&handle_id) else {
+            // JS layer passed a stale/unknown handle — treat as empty.
+            return String::new();
+        };
+        let StreamingDecoder { decoder, fatal } = entry;
+        let fatal = *fatal;
+        if fatal {
+            let cap = decoder
+                .max_utf8_buffer_length_without_replacement(bytes.len())
+                .unwrap_or(0);
+            let mut out = String::with_capacity(cap);
+            let (result, _read) = decoder.decode_to_string_without_replacement(&bytes, &mut out, last);
+            match result {
+                encoding_rs::DecoderResult::InputEmpty => out,
+                encoding_rs::DecoderResult::Malformed(_, _) => {
+                    // Fatal error — the JS layer's catch block calls
+                    // `op_encoding_decode_finish` to drop the handle. We
+                    // don't drop it here to avoid a double-remove (the JS
+                    // layer always finalizes on error). Return a sentinel
+                    // string; the outer frame throws the TypeError.
+                    return String::from("\u{FFFF}\u{FFFF}__FATAL__");
+                }
+                encoding_rs::DecoderResult::OutputFull => {
+                    return String::from("\u{FFFF}\u{FFFF}__OVERFLOW__");
+                }
+            }
+        } else {
+            let cap = decoder.max_utf8_buffer_length(bytes.len()).unwrap_or(0);
+            let mut out = String::with_capacity(cap);
+            let (_result, _read, _had_errors) = decoder.decode_to_string(&bytes, &mut out, last);
+            out
+        }
+    });
+
+    // Handle fatal-error sentinels from the closure (couldn't throw inside
+    // because `scope` was borrowed alongside the registry RefMut).
+    if text == "\u{FFFF}\u{FFFF}__FATAL__" {
+        let msg = v8::String::new(
+            scope,
+            "decode: invalid byte sequence (fatal: true)",
+        ).unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+    if text == "\u{FFFF}\u{FFFF}__OVERFLOW__" {
+        let msg = v8::String::new(
+            scope,
+            "decode: output buffer too small (fatal: true)",
+        ).unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    let s = v8::String::new(scope, &text).unwrap();
+    rv.set(s.into());
+}
+
+/// `op_encoding_decode_finish(handle_id: number) -> undefined` — drop a
+/// streaming decoder handle from the registry. Called by the JS layer in
+/// the `finally` block of `decode()` when `stream` is false (finalizing a
+/// run). No-op if the handle was already dropped (e.g. by a fatal error).
+fn op_encoding_decode_finish(
+    _scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let handle_id = args.get(0).integer_value(_scope).unwrap_or(0) as u32;
+    DECODER_REGISTRY.with(|reg| {
+        reg.borrow_mut().remove(&handle_id);
+    });
+    rv.set(v8::undefined(_scope).into());
+}
+
+/// `op_encoding_encode_into(input: String, dest: Uint8Array) -> Number` —
+/// encodes as much of `input` as fits into `dest` without splitting a
+/// UTF-8 scalar value's bytes across the boundary. Returns a packed
+/// Number: `read * 2^32 + written`, where `read` is the number of UTF-16
+/// code units consumed and `written` is the number of bytes written into
+/// `dest`. The JS layer unpacks this. A `read` of `-1` (sentinel) signals
+/// "use fallback" — but Limun's simpler impl always succeeds (no
+/// fast-path overflow), so the sentinel is never returned.
+///
+/// Matches Deno's packing scheme (read in high 32 bits, written in low 32)
+/// so the JS unpacking code can be identical.
+fn op_encoding_encode_into(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let input = args.get(0).to_rust_string_lossy(scope);
+    let Ok(view): Result<v8::Local<v8::ArrayBufferView>, _> = args.get(1).try_into() else {
+        let msg = v8::String::new(
+            scope,
+            "encodeInto: destination must be a Uint8Array",
+        ).unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    };
+
+    let dest_len = view.byte_length();
+    let bytes = input.as_bytes();
+    let max = dest_len.min(bytes.len());
+    let mut written = max;
+    while written > 0 && !input.is_char_boundary(written) {
+        written -= 1;
+    }
+
+    if written > 0 {
+        let data_ptr = view.data() as *mut u8;
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, written) };
+    }
+    // `read` = number of UTF-16 code units in the consumed prefix (matches
+    // Deno/the spec: `read` is in UTF-16 code units, not bytes).
+    let read = input[..written].encode_utf16().count();
+
+    let packed = (read as f64) * ((1u64 << 32) as f64) + (written as f64);
+    rv.set(v8::Number::new(scope, packed).into());
 }

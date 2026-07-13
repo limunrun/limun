@@ -46,6 +46,7 @@ progress across subagents and context compactions.
 ## Phase 2 — Remaining modules (dependency-first)
 
 - [x] dom_exception (JS port + Rust bridge for new_instance)
+- [x] text_encoding (JS port + 6 ops, bug #2 fixed)
 - [ ] console/* (JS port)
 - [ ] event (Event/EventTarget/AbortController/AbortSignal)
 - [ ] performance (HR Time)
