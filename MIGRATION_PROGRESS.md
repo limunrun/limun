@@ -24,14 +24,24 @@ progress across subagents and context compactions.
 - No snapshot — modules compile on first eval, dedup via REGISTRY
 - Differences from Deno: simpler ops surface (no OpState/op2), no snapshot, `__limunOps` vs `Deno.core.ops`
 
-## Phase 1 — Pilot: base64
+## Phase 1 — Pilot: base64 ✅ DONE
 
-- [ ] Port Deno's `05_base64.js` to internal JS
-- [ ] Add `op_base64_atob` / `op_base64_btoa` Rust ops
-- [ ] Rewire boundaries (ops, primordials, DOMException from JS layer)
-- [ ] Reduce old Rust `src/web/base64.rs` to ops only
-- [ ] WPT `html/webappapis/atob/base64.any.js` green through JS path
-- [ ] Verifier passes
+- [x] Port Deno's `05_base64.js` to `src/js/05_base64.js`
+- [x] Add `op_base64_atob` / `op_base64_btoa` Rust ops in `src/core/ops.rs`
+- [x] Rewire: `__limunOps`, primordials, `globalThis.DOMException`
+- [x] Remove `src/web/base64.rs`, remove `set_fn` calls from `src/web/mod.rs`
+- [x] WPT `html/webappapis/atob/base64.any.js` green (380/380 base64 tests, 458/459 overall)
+- [x] Verifier passes
+
+### Ops added
+- `op_base64_btoa(input: String) -> String` — Latin-1 validate + base64 encode, TypeError on >0xFF
+- `op_base64_atob(input: String) -> String` — forgiving base64 decode to binary string, TypeError on invalid
+
+### Deviations from Deno
+- WebIDL inline (no full webidl module yet) — will extract when 2nd module needs it
+- Forgiving-base64 validation split: spec steps (whitespace/padding/length/alphabet) in JS, bit math in Rust op
+- Uses `base64` crate instead of simdutf
+- `fetch_json` shim in WPT runner for local JSON fixtures (module loader instead of fetch)
 
 ## Phase 2 — Remaining modules (dependency-first)
 

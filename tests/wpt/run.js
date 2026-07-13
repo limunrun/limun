@@ -44,11 +44,35 @@ for (const arg of args) {
 
 async function loadScript(relPath) {
   const mod = await import(new URL(relPath, here).href, { with: { type: "text" } });
+  // Track the current script's URL so `fetch_json` can resolve relative
+  // resources against it (matching a browser's document-base resolution).
+  currentScriptUrl = new URL(relPath, here).href;
   (0, eval)(mod.default);
 }
 
+let currentScriptUrl = here.href;
 await loadScript("./suite/resources/testharness.js");
 await loadScript("./testharnessreport.js");
+
+// Shim `fetch_json` to load WPT fixture JSON via the module loader (import
+// attribute `type:"json"`) instead of `fetch`. WPT's `fetch_json(resource)`
+// resolves `resource` against the *test page's* URL — but limun has no
+// browsing context / document base URL, so a relative path like
+// `"../../../fetch/data-urls/resources/base64.json"` has no base to resolve
+// against and `fetch` rejects ("relative URL without a base"). We resolve
+// it against `currentScriptUrl` (the URL of the test file most recently
+// loaded via `loadScript`), which matches the on-disk layout of the
+// vendored WPT suite.
+const realFetchJson = globalThis.fetch_json;
+globalThis.fetch_json = async (resource) => {
+  try {
+    const url = new URL(resource, currentScriptUrl).href;
+    const mod = await import(url, { with: { type: "json" } });
+    return mod.default;
+  } catch {
+    return realFetchJson(resource);
+  }
+};
 
 setup({ explicit_done: true });
 const realDone = done;
@@ -66,6 +90,7 @@ const defaultFiles = [
   "dom/abort/event.any.js",
   "dom/abort/timeout.any.js",
   "dom/abort/AbortSignal.any.js",
+  "html/webappapis/atob/base64.any.js",
 ];
 
 // When --suite=<name> is given, discover .any.js files under suite/<name>/.

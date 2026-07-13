@@ -5,7 +5,6 @@
 //! WHATWG HTML `Window` interface, adapted to a terminal (Deno model). No
 //! `window` itself: there is no browsing context here to name.
 
-pub mod base64;
 pub mod blob;
 pub mod console;
 pub mod dom_exception;
@@ -61,9 +60,12 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     // === false`).
     text_encoding::install(scope, global);
 
-    // `btoa`/`atob` — plain operations, enumerable (verified against Node).
-    set_fn(scope, global, "btoa", base64::btoa);
-    set_fn(scope, global, "atob", base64::atob);
+    // `btoa`/`atob` — installed by the JS module `ext:limun/05_base64.js`
+    // during bootstrap (plain operations, enumerable — verified against
+    // Node/Deno/browsers). The JS layer owns the spec surface (WebIDL
+    // argument validation, DOMString conversion, DOMException error
+    // types); the Rust ops `op_base64_atob`/`op_base64_btoa` (registered in
+    // `core::ops`) are flat encode/decode.
 
     // URL Standard — real constructible classes, non-enumerable.
     url::install(scope, global);
