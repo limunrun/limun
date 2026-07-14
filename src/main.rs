@@ -71,6 +71,10 @@ fn main() -> ExitCode {
     core::event_loop::set_bridge_rx(rx);
     core::event_loop::init_timer_channel();
 
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     // --- V8 boot (once per process) ---
     let platform = v8::new_default_platform(0, false).make_shared();
     v8::V8::initialize_platform(platform);

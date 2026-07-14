@@ -89,6 +89,20 @@ async function loadAnyJs(relPath) {
     } else {
       preambleUrl = new URL(preamblePath, fileUrl);
     }
+    // `.sub.js` files contain WPT server template placeholders ({{host}},
+    // {{ports[ws][0]}}). We can't run the WPT server, so substitute with
+    // a shim file if one exists (e.g. `constants.shim.js` for
+    // `constants.sub.js`).
+    let shimUrl = preambleUrl.href.replace(/\.sub\.js$/, ".shim.js");
+    if (shimUrl !== preambleUrl.href) {
+      try {
+        const shimMod = await import(shimUrl, { with: { type: "text" } });
+        parts.push(shimMod.default);
+        continue;
+      } catch {
+        // No shim — fall through to the original.
+      }
+    }
     const rel = preambleUrl.href.slice(here.href.length);
     if (rel === "") {
       currentScriptUrl = fileUrl.href;
@@ -408,6 +422,24 @@ const defaultFiles = [
   // fixture, and `currentScriptUrl` points at the last loaded file when
   // the async harness starts running.
   "fetch/api/headers/headers-no-cors.any.js",
+  // --- Web Messaging (BroadcastChannel) ----------------------------------
+  // Single-realm — in-process pub/sub, no cross-VM transport needed.
+  "webmessaging/broadcastchannel/basics.any.js",
+  "webmessaging/broadcastchannel/interface.any.js",
+  // --- WebSocket (constructor validation — no server needed) -------------
+  // These test URL parsing, protocol validation, and close code validation
+  // without needing a live WebSocket echo server. Server-dependent tests
+  // are in `tests/wpt/ws_run.js` (run separately with the echo server).
+  "websockets/Create-invalid-urls.any.js",
+  "websockets/Create-nonAscii-protocol-string.any.js",
+  "websockets/Create-protocol-with-space.any.js",
+  "websockets/Create-protocols-repeated.any.js",
+  "websockets/Create-protocols-repeated-case-insensitive.any.js",
+  "websockets/Create-url-with-space.any.js",
+  "websockets/Create-blocked-port.any.js",
+  "websockets/Create-http-urls.any.js",
+  "websockets/close-invalid.any.js",
+  "websockets/Send-before-open.any.js",
 ];
 
 // When --suite=<name> is given, discover .any.js files under suite/<name>/.

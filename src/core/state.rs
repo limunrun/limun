@@ -14,6 +14,7 @@ use url::Url;
 pub enum PendingKind {
     Fetch,
     Import { url: Url, kind: ModuleKind },
+    WebSocket,
 }
 
 /// A spawned-but-unfinished tokio task whose result will resolve/reject a

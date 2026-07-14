@@ -28,7 +28,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_util::sync::CancellationToken;
 
-use crate::core::bridge::{FetchPayload, TaskResult};
+use crate::core::bridge::{FetchPayload, TaskResult, WsCreateResult, WsEventResult};
 use crate::core::state::PENDING_TASKS;
 
 struct Timer {
@@ -249,6 +249,12 @@ pub fn run(scope: &mut v8::PinScope) {
                 resolve_import(scope, task_id, url, kind, result)
             }
             TaskResult::Timer { timer_id } => fire_timer(scope, timer_id),
+            TaskResult::WsCreate { task_id, rid, result } => {
+                resolve_ws_create(scope, task_id, rid, result)
+            }
+            TaskResult::WsEvent { task_id, rid, result } => {
+                resolve_ws_event(scope, task_id, rid, result)
+            }
         }
 
         // Give V8 a chance to run whatever the callback (or its Promise
@@ -421,6 +427,87 @@ fn fire_timer(scope: &mut v8::PinScope, id: u32) {
             c.borrow_mut().remove(&id);
         });
     }
+}
+
+/// `TaskResult::WsCreate` handler: settle the pending `PromiseResolver`
+/// with a plain object `{ rid, protocol, extensions }` on success, or
+/// reject with a TypeError on failure.
+fn resolve_ws_create(
+    scope: &mut v8::PinScope,
+    task_id: u64,
+    rid: u32,
+    result: Result<WsCreateResult, String>,
+) {
+    let Some(task) = PENDING_TASKS.with(|p| p.borrow_mut().remove(&task_id)) else {
+        return;
+    };
+    let resolver = v8::Local::new(scope, &task.resolver);
+    match result {
+        Ok(payload) => {
+            let obj = v8::Object::new(scope);
+
+            let rid_key = v8::String::new(scope, "rid").unwrap();
+            obj.set(scope, rid_key.into(), v8::Number::new(scope, rid as f64).into());
+
+            let proto_key = v8::String::new(scope, "protocol").unwrap();
+            obj.set(scope, proto_key.into(), v8::String::new(scope, &payload.protocol).unwrap().into());
+
+            let ext_key = v8::String::new(scope, "extensions").unwrap();
+            obj.set(scope, ext_key.into(), v8::String::new(scope, &payload.extensions).unwrap().into());
+
+            let _ = resolver.resolve(scope, obj.into());
+        }
+        Err(message) => {
+            let msg = v8::String::new(scope, &format!("WebSocket: {message}")).unwrap();
+            let exception = v8::Exception::type_error(scope, msg);
+            let _ = resolver.reject(scope, exception);
+        }
+    }
+}
+
+/// `TaskResult::WsEvent` handler: settle the pending `PromiseResolver`
+/// with the event kind number (0=text, 1=binary, 2=pong, 3=error,
+/// >=1000=close code). The actual payload is stashed in the
+/// `WS_BUFFERS` thread-local for the JS side to retrieve via
+/// `op_ws_get_buffer`/`op_ws_get_buffer_as_string`/`op_ws_get_error`.
+fn resolve_ws_event(
+    scope: &mut v8::PinScope,
+    task_id: u64,
+    rid: u32,
+    result: WsEventResult,
+) {
+    let Some(task) = PENDING_TASKS.with(|p| p.borrow_mut().remove(&task_id)) else {
+        return;
+    };
+    let resolver = v8::Local::new(scope, &task.resolver);
+
+    let kind: f64 = match &result {
+        WsEventResult::Text(_) => 0.0,
+        WsEventResult::Binary(_) => 1.0,
+        WsEventResult::Pong => 2.0,
+        WsEventResult::Error(_) => 3.0,
+        WsEventResult::Close(code, _) => *code as f64,
+    };
+
+    match result {
+        WsEventResult::Text(text) => {
+            crate::web::websocket::stash_buffer(rid, crate::web::websocket::WsBufferKind::Text(text));
+        }
+        WsEventResult::Binary(data) => {
+            crate::web::websocket::stash_buffer(rid, crate::web::websocket::WsBufferKind::Binary(data));
+        }
+        WsEventResult::Error(msg) => {
+            crate::web::websocket::stash_buffer(rid, crate::web::websocket::WsBufferKind::Error(msg));
+        }
+        WsEventResult::Close(code, reason) => {
+            if code != 1005 && !reason.is_empty() {
+                crate::web::websocket::stash_buffer(rid, crate::web::websocket::WsBufferKind::Text(reason));
+            }
+        }
+        WsEventResult::Pong => {}
+    }
+
+    let _ = resolver.resolve(scope, v8::Number::new(scope, kind).into());
 }
 
 /// Drop all pending timers + cancel in-flight sleeps. Must run before the

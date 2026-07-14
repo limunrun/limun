@@ -155,6 +155,14 @@ pub static REGISTRY: &[InternalModule] = &[
         source: include_str!("../web/23_fetch.js"),
     },
     InternalModule {
+        specifier: "ext:limun/24_websocket.js",
+        source: include_str!("../web/24_websocket.js"),
+    },
+    InternalModule {
+        specifier: "ext:limun/25_broadcast_channel.js",
+        source: include_str!("../web/25_broadcast_channel.js"),
+    },
+    InternalModule {
         specifier: "ext:limun/41_prompt.js",
         source: include_str!("../web/41_prompt.js"),
     },

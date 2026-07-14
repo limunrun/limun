@@ -15,7 +15,8 @@
             "default": false,
             "file://**": { "read": true },
             "https://esm.sh/": { "read": true },
-            "https://raw.githubusercontent.com/": { "read": true }
+            "https://raw.githubusercontent.com/": { "read": true },
+            "ws://127.0.0.1:8787/": { "read": true }
         }
     }
 }

@@ -8,6 +8,7 @@
 pub mod dom_exception;
 pub mod fetch;
 pub mod performance;
+pub mod websocket;
 
 /// Install all web-standard globals onto `context`'s global object.
 pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {

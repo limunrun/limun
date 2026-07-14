@@ -56,6 +56,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 # for the static-import module-load path which V8 forces synchronous).
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip", "brotli"] }
 
+# WebSocket transport (tokio-tungstenite) for the WebSocket API.
+tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+futures-util = "0.3"
+http = "1"
+
 # CancellationToken for setTimeout/setInterval cancellation.
 tokio-util = { version = "0.7", features = ["rt"] }
 cipher = "0.4"

@@ -81,6 +81,19 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     // `web::fetch::op_fetch`'s doc comment.
     set_fn(scope, ops, "op_fetch", crate::web::fetch::op_fetch);
 
+    // WebSocket Standard — async WebSocket transport (tokio-tungstenite +
+    // bridge channel). The spec surface lives in JS
+    // (`ext:limun/24_websocket.js`); see `web::websocket`'s doc comment.
+    set_fn(scope, ops, "op_ws_create", crate::web::websocket::op_ws_create);
+    set_fn(scope, ops, "op_ws_next_event", crate::web::websocket::op_ws_next_event);
+    set_fn(scope, ops, "op_ws_get_buffer", crate::web::websocket::op_ws_get_buffer);
+    set_fn(scope, ops, "op_ws_get_buffer_as_string", crate::web::websocket::op_ws_get_buffer_as_string);
+    set_fn(scope, ops, "op_ws_get_error", crate::web::websocket::op_ws_get_error);
+    set_fn(scope, ops, "op_ws_send_text", crate::web::websocket::op_ws_send_text);
+    set_fn(scope, ops, "op_ws_send_binary", crate::web::websocket::op_ws_send_binary);
+    set_fn(scope, ops, "op_ws_close", crate::web::websocket::op_ws_close);
+    set_fn(scope, ops, "op_ws_get_buffered_amount", crate::web::websocket::op_ws_get_buffered_amount);
+
     // URL Standard ops — parse/reparse/serialize + search-params helpers.
     // The spec surface (the `URL`/`URLSearchParams` classes, getters,
     // setters, live linkage, WebIDL argument validation) lives in the JS

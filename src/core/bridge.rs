@@ -19,6 +19,16 @@ pub enum TaskResult {
     Timer {
         timer_id: u32,
     },
+    WsCreate {
+        task_id: u64,
+        rid: u32,
+        result: Result<WsCreateResult, String>,
+    },
+    WsEvent {
+        task_id: u64,
+        rid: u32,
+        result: WsEventResult,
+    },
 }
 
 pub struct FetchPayload {
@@ -26,12 +36,19 @@ pub struct FetchPayload {
     pub status_text: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
-    /// The URL the user originally requested (pre-redirect). Carried through
-    /// the tokio task as a plain `String` (captured at spawn time) so the
-    /// receive-side can pass it to `Response::new_instance` along with
-    /// `final_url` for the `.redirected` computation.
     pub original_url: String,
-    /// Final URL after redirects (reqwest follows them by default). Matches
-    /// browser `Response.url`.
     pub final_url: String,
+}
+
+pub struct WsCreateResult {
+    pub protocol: String,
+    pub extensions: String,
+}
+
+pub enum WsEventResult {
+    Text(String),
+    Binary(Vec<u8>),
+    Pong,
+    Error(String),
+    Close(u16, String),
 }
