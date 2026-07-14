@@ -57,9 +57,10 @@ EC (ECDSA/ECDH P-256/P-384/P-521), Ed25519, X25519, HKDF, PBKDF2.
 - [x] `reportError` global + ErrorEvent/ProgressEvent plumbing
 - **Status:** complete — WPT 24339/24343 (4 pre-existing streams/messaging failures)
 
-### 3. navigator + URLPattern
-- [ ] `navigator` global (Navigator interface: userAgent, hardwareConcurrency, language)
-- [ ] `URLPattern` — port Deno's `ext/url/01_urlpattern.js`
+### 3. navigator + URLPattern — COMPLETE
+- [x] `navigator` global (Navigator interface: userAgent, hardwareConcurrency, language, languages, platform, onLine)
+- [x] `URLPattern` — ported from Deno's `ext/url/01_urlpattern.js`
+- **Status:** complete — WPT 24339/24343 (4 pre-existing streams/messaging failures; no URLPattern WPT suite vendored)
 
 ### 4. WebSocket + BroadcastChannel
 - [ ] `WebSocket` — port `ext/websocket`. Transport is Rust op; spec surface is JS.
