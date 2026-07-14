@@ -48,19 +48,18 @@ EC (ECDSA/ECDH P-256/P-384/P-521), Ed25519, X25519, HKDF, PBKDF2.
   - Added `QuotaExceededError` DOMException subclass (WPT harness checks constructor identity)
   - `crypto` global is enumerable (correct per Web IDL §3.7.3, matches browsers)
 
-### 2. Complete `ext/web`
-- [ ] `10_filereader.js` — FileReader
-- [ ] `14_compression.js` — CompressionStream / DecompressionStream
-- [ ] TextEncoderStream / TextDecoderStream (in Deno's `08_text_encoding.js`)
-- [ ] `01_mimesniff.js` — MIME type parsing. Wire into Blob/Response
-- [ ] `00_infra.js` — shared infra helpers
-- [ ] `reportError`
-- **Status:** not started
+### 2. Complete `ext/web` — COMPLETE
+- [x] `10_filereader.js` — FileReader
+- [x] `14_compression.js` — CompressionStream / DecompressionStream
+- [x] TextEncoderStream / TextDecoderStream
+- [x] `01_mimesniff.js` — MIME type parsing, wired into FileReader.readAsText charset
+- [x] `00_infra.js` — shared infra helpers
+- [x] `reportError` global + ErrorEvent/ProgressEvent plumbing
+- **Status:** complete — WPT 24339/24343 (4 pre-existing streams/messaging failures)
 
 ### 3. navigator + URLPattern
 - [ ] `navigator` global (Navigator interface: userAgent, hardwareConcurrency, language)
 - [ ] `URLPattern` — port Deno's `ext/url/01_urlpattern.js`
-- **Status:** not started
 
 ### 4. WebSocket + BroadcastChannel
 - [ ] `WebSocket` — port `ext/websocket`. Transport is Rust op; spec surface is JS.
@@ -85,4 +84,4 @@ Performance Timeline (mark/measure/PerformanceObserver).
 - Build: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo build`
 - WPT: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo run -- tests/wpt/run.js`
 - Baseline WPT (pre-migration): 78/79
-- Current WPT: 24196/24200
+- Current WPT: 24339/24343
