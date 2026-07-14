@@ -63,6 +63,10 @@ pub static REGISTRY: &[InternalModule] = &[
         source: include_str!("../web/00_url.js"),
     },
     InternalModule {
+        specifier: "ext:limun/01_urlpattern.js",
+        source: include_str!("../web/01_urlpattern.js"),
+    },
+    InternalModule {
         specifier: "ext:limun/01_console.js",
         source: include_str!("../web/01_console.js"),
     },
@@ -121,6 +125,10 @@ pub static REGISTRY: &[InternalModule] = &[
     InternalModule {
         specifier: "ext:limun/10_form_data.js",
         source: include_str!("../web/10_form_data.js"),
+    },
+    InternalModule {
+        specifier: "ext:limun/12_navigator.js",
+        source: include_str!("../web/12_navigator.js"),
     },
     InternalModule {
         specifier: "ext:limun/15_performance.js",

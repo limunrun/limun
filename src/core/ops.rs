@@ -44,6 +44,8 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     set_fn(scope, ops, "op_test_add", op_test_add);
     set_fn(scope, ops, "op_print", op_print);
     set_fn(scope, ops, "op_is_proxy", op_is_proxy);
+    set_fn(scope, ops, "op_navigator_hardware_concurrency", op_navigator_hardware_concurrency);
+    set_fn(scope, ops, "op_navigator_platform", op_navigator_platform);
     set_fn(scope, ops, "op_base64_atob", op_base64_atob);
     set_fn(scope, ops, "op_base64_btoa", op_base64_btoa);
     set_fn(scope, ops, "op_compression_new", op_compression_new);
@@ -205,6 +207,34 @@ fn op_is_proxy(
 ) {
     let is_proxy = args.get(0).is_proxy();
     rv.set(v8::Boolean::new(scope, is_proxy).into());
+}
+
+// --- Navigator Standard ----------------------------------------------------
+//
+// HTML Navigator interface (`navigator` global). The spec surface (the
+// `Navigator` class, WebIDL branding, readonly getters) lives in
+// `ext:limun/12_navigator.js`; these two ops are the irreducible native
+// work. Both return plain V8 strings/numbers with no side effects.
+
+fn op_navigator_hardware_concurrency(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let count = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1);
+    rv.set(v8::Number::new(scope, count as f64).into());
+}
+
+fn op_navigator_platform(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let platform = std::env::consts::OS;
+    let s = v8::String::new(scope, platform).unwrap();
+    rv.set(s.into());
 }
 
 /// `op_print(text: String, is_err: bool) -> undefined` — writes `text` to
