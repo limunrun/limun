@@ -9,3 +9,7 @@ Node.js compatibility is an external package concern, never ambient, never in
 the runtime's globals.
 
 See [MISSION.md](./MISSION.md) for the why and the API philosophy.
+
+---
+
+BTW im using LLMs heavyly for this. i just want it to exists rn. i dont have time to work in it myself.
