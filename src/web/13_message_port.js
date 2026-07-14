@@ -319,7 +319,9 @@
         const t = transfer[i];
         if (ObjectPrototypeIsPrototypeOf(MessagePortPrototype, t)) {
           const partner = t[_entangled];
-          partnerPorts.push({ transferredPort: t, partner });
+          const pendingMessages = t[_queue];
+          t[_queue] = [];
+          partnerPorts.push({ transferredPort: t, partner, pendingMessages });
           // Disentangle the transferred port on the sender side — it's
           // now "neutered" (closed for posting). The partner stays live
           // and will be re-entangled with the fresh port the receiver
@@ -562,7 +564,7 @@
       ArrayPrototypePush(transferables, transferredArrayBuffers[i]);
     }
     for (let i = 0; i < partnerPorts.length; i++) {
-      const { partner } = partnerPorts[i];
+      const { partner, pendingMessages } = partnerPorts[i];
       const newPort = createMessagePort();
       // Re-entangle the fresh port with the partner. The partner's
       // `[_entangled]` was cleared on the sender side (postMessage's
@@ -580,9 +582,12 @@
           const msg = partner[_pendingQueue].shift();
           ArrayPrototypePush(newPort[_queue], msg);
         }
-        if (newPort[_enabled] && newPort[_queue].length > 0) {
-          scheduleDispatch(newPort);
-        }
+      }
+      for (let j = 0; j < pendingMessages.length; j++) {
+        ArrayPrototypePush(newPort[_queue], pendingMessages[j]);
+      }
+      if (newPort[_enabled] && newPort[_queue].length > 0) {
+        scheduleDispatch(newPort);
       }
       ArrayPrototypePush(transferables, newPort);
     }
@@ -601,7 +606,7 @@
       // `read_host_object` sets it).
       if (value[hostObjectBrand] === true) {
         if (shellIdx < partnerPorts.length) {
-          const { partner } = partnerPorts[shellIdx];
+          const { partner, pendingMessages } = partnerPorts[shellIdx];
           shellIdx++;
           const newPort = createMessagePort();
           newPort[_entangled] = partner;
@@ -613,9 +618,12 @@
               const msg = partner[_pendingQueue].shift();
               ArrayPrototypePush(newPort[_queue], msg);
             }
-            if (newPort[_enabled] && newPort[_queue].length > 0) {
-              scheduleDispatch(newPort);
-            }
+          }
+          for (let j = 0; j < pendingMessages.length; j++) {
+            ArrayPrototypePush(newPort[_queue], pendingMessages[j]);
+          }
+          if (newPort[_enabled] && newPort[_queue].length > 0) {
+            scheduleDispatch(newPort);
           }
           return newPort;
         }

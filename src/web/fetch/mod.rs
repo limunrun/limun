@@ -200,6 +200,15 @@ async fn do_fetch(
     body: Option<Vec<u8>>,
     cancel: Option<CancellationToken>,
 ) -> Result<(u16, String, Vec<(String, String)>, Vec<u8>, String), String> {
+    if url.scheme() == "file" {
+        let path = url
+            .to_file_path()
+            .map_err(|_| format!("cannot fetch {url}: invalid file path"))?;
+        let body_bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|e| format!("cannot fetch {url}: {e}"))?;
+        return Ok((200, "OK".to_string(), Vec::new(), body_bytes, url.to_string()));
+    }
     let method = reqwest::Method::from_bytes(method.as_bytes())
         .map_err(|_| format!("invalid HTTP method \"{method}\""))?;
     let client = reqwest::Client::builder()
