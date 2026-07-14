@@ -57,40 +57,56 @@ async function loadScript(relPath) {
 // resolved relative to the test file's directory (matching the WPT
 // convention). Extracted from comment lines at the top of the file.
 const META_SCRIPT_PATTERN = /^\/\/\s*META:\s*script=(.+?)\s*$/gm;
+
+// Load a `.any.js` test file *together* with its `META: script=` preamble
+// scripts in a single `new Function` scope, so that top-level `let`/`const`
+// and `function` declarations in the preamble are visible to the test file
+// (as they would be in a browser's shared `<script>`-document scope) but
+// are **not** leaked to `globalThis` — preventing collisions between test
+// files that define identically-named helpers (`getTestData`, `define_tests`,
+// …).  Each `.any.js` file gets its own function scope, matching the
+// per-document isolation that real browsers provide.
 async function loadAnyJs(relPath) {
   const fileUrl = new URL(relPath, here);
   const mod = await import(fileUrl.href, { with: { type: "text" } });
   const src = mod.default;
   currentScriptUrl = fileUrl.href;
-  // Resolve + load any `META: script=` preamble files first, in order,
-  // in the same global scope (indirect eval). The regex is global so we
-  // collect every match; the path is relative to the test file's dir.
+
+  // Collect the source text of each META preamble script + the test file
+  // itself, then run them all inside one `new Function` so they share a
+  // single function scope (like one document) without polluting
+  // `globalThis` with file-local declarations.
+  const parts = [];
   let match;
   const re = new RegExp(META_SCRIPT_PATTERN);
   while ((match = re.exec(src)) !== null) {
     let preamblePath = match[1];
-    // WPT absolute paths (`/common/gc.js`, `/resources/...`) resolve against
-    // the server root, which maps to `tests/wpt/suite/` in our vendored
-    // layout. Strip the leading `/` and load relative to `./suite/`.
+    let preambleUrl;
+    // WPT absolute paths (`/common/gc.js`, `/resources/...`) resolve
+    // against the server root → `tests/wpt/suite/`.
     if (preamblePath.startsWith("/")) {
-      await loadScript(`./suite/${preamblePath.slice(1)}`);
+      preambleUrl = new URL(`./suite/${preamblePath.slice(1)}`, here);
     } else {
-      const preambleUrl = new URL(preamblePath, fileUrl);
-      // Normalize relative to `here` (the run.js dir) so the import
-      // specifier points back into the vendored suite.
-      const rel = preambleUrl.href.slice(here.href.length);
-      if (rel === "") {
-        // Resolved to the run.js dir itself — skip (bad META path).
-        currentScriptUrl = fileUrl.href;
-        continue;
-      }
-      await loadScript(`./${rel}`);
+      preambleUrl = new URL(preamblePath, fileUrl);
     }
-    // Restore the current script URL so `fetch_json` resolution still
-    // points at the test file, not the preamble.
-    currentScriptUrl = fileUrl.href;
+    const rel = preambleUrl.href.slice(here.href.length);
+    if (rel === "") {
+      currentScriptUrl = fileUrl.href;
+      continue;
+    }
+    const preambleMod = await import(preambleUrl.href, { with: { type: "text" } });
+    parts.push(preambleMod.default);
   }
-  (0, eval)(src);
+
+  parts.push(src);
+  const combined = parts.join("\n");
+  currentScriptUrl = fileUrl.href;
+  // `new Function` creates a non-strict function scope — same semantics as
+  // indirect eval for `var`/`function` (local to the function, not to
+  // `globalThis`), while `let`/`const` are also local.  Harness globals
+  // (`test`, `promise_test`, `assert_*`, …) are on `globalThis` and remain
+  // accessible from inside the function.
+  new Function(combined)();
 }
 
 let currentScriptUrl = here.href;
@@ -337,6 +353,19 @@ const defaultFiles = [
   "WebCryptoAPI/generateKey/failures_AES-GCM.https.any.js",
   "WebCryptoAPI/generateKey/failures_AES-KW.https.any.js",
   "WebCryptoAPI/generateKey/failures_HMAC.https.any.js",
+  "WebCryptoAPI/sign_verify/rsa_pkcs.https.any.js",
+  "WebCryptoAPI/sign_verify/rsa_pss.https.any.js",
+  "WebCryptoAPI/sign_verify/ecdsa.https.any.js",
+  "WebCryptoAPI/encrypt_decrypt/rsa_oaep.https.any.js",
+  "WebCryptoAPI/import_export/rsa_importKey.https.any.js",
+  "WebCryptoAPI/import_export/ec_importKey.https.any.js",
+  "WebCryptoAPI/import_export/ec_importKey_failures_ECDH.https.any.js",
+  "WebCryptoAPI/import_export/ec_importKey_failures_ECDSA.https.any.js",
+  "WebCryptoAPI/derive_bits_keys/ecdh_bits.https.any.js",
+  "WebCryptoAPI/derive_bits_keys/ecdh_keys.https.any.js",
+  "WebCryptoAPI/derive_bits_keys/hkdf.https.any.js",
+  "WebCryptoAPI/derive_bits_keys/pbkdf2.https.any.js",
+  "WebCryptoAPI/wrapKey_unwrapKey/wrapKey_unwrapKey.https.any.js",
   // Keep `headers-no-cors.any.js` last: it uses `fetch()` for a WPT
   // fixture, and `currentScriptUrl` points at the last loaded file when
   // the async harness starts running.

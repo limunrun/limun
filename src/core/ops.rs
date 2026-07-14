@@ -129,6 +129,48 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     set_fn(scope, ops, "op_crypto_decrypt_aes_ctr", op_crypto_decrypt_aes_ctr);
     set_fn(scope, ops, "op_crypto_encrypt_aes_gcm", op_crypto_encrypt_aes_gcm);
     set_fn(scope, ops, "op_crypto_decrypt_aes_gcm", op_crypto_decrypt_aes_gcm);
+    set_fn(scope, ops, "op_crypto_generate_rsa_key", op_crypto_generate_rsa_key);
+    set_fn(scope, ops, "op_crypto_import_rsa_pkcs8", op_crypto_import_rsa_pkcs8);
+    set_fn(scope, ops, "op_crypto_import_rsa_spki", op_crypto_import_rsa_spki);
+    set_fn(scope, ops, "op_crypto_export_rsa_pkcs8", op_crypto_export_rsa_pkcs8);
+    set_fn(scope, ops, "op_crypto_export_rsa_spki", op_crypto_export_rsa_spki);
+    set_fn(scope, ops, "op_crypto_import_rsa_jwk", op_crypto_import_rsa_jwk);
+    set_fn(scope, ops, "op_crypto_export_rsa_jwk", op_crypto_export_rsa_jwk);
+    set_fn(scope, ops, "op_crypto_sign_rsa", op_crypto_sign_rsa);
+    set_fn(scope, ops, "op_crypto_verify_rsa", op_crypto_verify_rsa);
+    set_fn(scope, ops, "op_crypto_encrypt_rsa_oaep", op_crypto_encrypt_rsa_oaep);
+    set_fn(scope, ops, "op_crypto_decrypt_rsa_oaep", op_crypto_decrypt_rsa_oaep);
+    set_fn(scope, ops, "op_crypto_generate_ec_keypair", op_crypto_generate_ec_keypair);
+    set_fn(scope, ops, "op_crypto_import_ec_raw", op_crypto_import_ec_raw);
+    set_fn(scope, ops, "op_crypto_import_ec_pkcs8", op_crypto_import_ec_pkcs8);
+    set_fn(scope, ops, "op_crypto_import_ec_spki", op_crypto_import_ec_spki);
+    set_fn(scope, ops, "op_crypto_export_ec_raw", op_crypto_export_ec_raw);
+    set_fn(scope, ops, "op_crypto_export_ec_pkcs8", op_crypto_export_ec_pkcs8);
+    set_fn(scope, ops, "op_crypto_export_ec_spki", op_crypto_export_ec_spki);
+    set_fn(scope, ops, "op_crypto_ec_public_from_private", op_crypto_ec_public_from_private);
+    set_fn(scope, ops, "op_crypto_import_ec_jwk_private", op_crypto_import_ec_jwk_private);
+    set_fn(scope, ops, "op_crypto_sign_ecdsa", op_crypto_sign_ecdsa);
+    set_fn(scope, ops, "op_crypto_verify_ecdsa", op_crypto_verify_ecdsa);
+    set_fn(scope, ops, "op_crypto_derive_bits_ecdh", op_crypto_derive_bits_ecdh);
+    set_fn(scope, ops, "op_crypto_generate_ed25519_keypair", op_crypto_generate_ed25519_keypair);
+    set_fn(scope, ops, "op_crypto_import_spki_ed25519", op_crypto_import_spki_ed25519);
+    set_fn(scope, ops, "op_crypto_import_pkcs8_ed25519", op_crypto_import_pkcs8_ed25519);
+    set_fn(scope, ops, "op_crypto_export_spki_ed25519", op_crypto_export_spki_ed25519);
+    set_fn(scope, ops, "op_crypto_export_pkcs8_ed25519", op_crypto_export_pkcs8_ed25519);
+    set_fn(scope, ops, "op_crypto_jwk_x_ed25519", op_crypto_jwk_x_ed25519);
+    set_fn(scope, ops, "op_crypto_sign_ed25519", op_crypto_sign_ed25519);
+    set_fn(scope, ops, "op_crypto_verify_ed25519", op_crypto_verify_ed25519);
+    set_fn(scope, ops, "op_crypto_generate_x25519_keypair", op_crypto_generate_x25519_keypair);
+    set_fn(scope, ops, "op_crypto_import_spki_x25519", op_crypto_import_spki_x25519);
+    set_fn(scope, ops, "op_crypto_import_pkcs8_x25519", op_crypto_import_pkcs8_x25519);
+    set_fn(scope, ops, "op_crypto_export_spki_x25519", op_crypto_export_spki_x25519);
+    set_fn(scope, ops, "op_crypto_export_pkcs8_x25519", op_crypto_export_pkcs8_x25519);
+    set_fn(scope, ops, "op_crypto_x25519_public_key", op_crypto_x25519_public_key);
+    set_fn(scope, ops, "op_crypto_derive_bits_x25519", op_crypto_derive_bits_x25519);
+    set_fn(scope, ops, "op_crypto_derive_bits_hkdf", op_crypto_derive_bits_hkdf);
+    set_fn(scope, ops, "op_crypto_derive_bits_pbkdf2", op_crypto_derive_bits_pbkdf2);
+    set_fn(scope, ops, "op_crypto_wrap_key_aes_kw", op_crypto_wrap_key_aes_kw);
+    set_fn(scope, ops, "op_crypto_unwrap_key_aes_kw", op_crypto_unwrap_key_aes_kw);
 
     crate::web::set_global(scope, global, "__limunOps", ops.into());
 }
@@ -2605,4 +2647,2180 @@ fn op_crypto_decrypt_aes_gcm(
             scope.throw_exception(v8::Exception::type_error(scope, msg));
         }
     }
+}
+
+// --- RSA ops ---------------------------------------------------------------
+
+use rsa::traits::PublicKeyParts;
+use pkcs8::DecodePrivateKey;
+use spki::DecodePublicKey;
+use pkcs8::EncodePrivateKey;
+use spki::EncodePublicKey;
+
+fn op_crypto_generate_rsa_key(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use rand_core::UnwrapErr;
+    use getrandom::SysRng;
+
+    let modulus_length = args.get(0).uint32_value(scope).unwrap_or(2048) as usize;
+    let exp_bytes = read_bytes(args.get(1)).unwrap_or_default();
+    let exp = rsa::BoxedUint::from_be_slice_vartime(&exp_bytes);
+
+    let mut rng = UnwrapErr(SysRng::default());
+    let private_key = match rsa::RsaPrivateKey::new_with_exp(&mut rng, modulus_length, exp) {
+        Ok(k) => k,
+        Err(e) => {
+            let msg = v8::String::new(
+                scope,
+                &format!("RSA key generation failed: {e}"),
+            ).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let pkcs8_der = match private_key.to_pkcs8_der() {
+        Ok(doc) => doc.as_bytes().to_vec(),
+        Err(e) => {
+            let msg = v8::String::new(scope, &format!("RSA PKCS8 export failed: {e}")).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let public_key = rsa::RsaPublicKey::from(&private_key);
+    let spki_der = match public_key.to_public_key_der() {
+        Ok(doc) => doc.as_bytes().to_vec(),
+        Err(e) => {
+            let msg = v8::String::new(scope, &format!("RSA SPKI export failed: {e}")).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let result = v8::Object::new(scope);
+    let pk_key = v8::String::new(scope, "privateKey").unwrap();
+    let pk_val = vec_to_uint8_array(scope, pkcs8_der);
+    result.set(scope, pk_key.into(), pk_val.into());
+    let pub_key = v8::String::new(scope, "publicKey").unwrap();
+    let pub_val = vec_to_uint8_array(scope, spki_der);
+    result.set(scope, pub_key.into(), pub_val.into());
+    rv.set(result.into());
+}
+
+fn op_crypto_import_rsa_pkcs8(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let pkcs8 = read_bytes(args.get(0)).unwrap_or_default();
+    let private_key = match rsa::RsaPrivateKey::from_pkcs8_der(&pkcs8) {
+        Ok(k) => k,
+        Err(_) => {
+            let msg = v8::String::new(scope, "RSA import: invalid PKCS8 data").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+    let modulus_length = private_key.n().bits() as u32;
+    let public_exponent = private_key.e().to_be_bytes_trimmed_vartime().to_vec();
+    let pkcs8_der = match private_key.to_pkcs8_der() {
+        Ok(doc) => doc.as_bytes().to_vec(),
+        Err(_) => {
+            let msg = v8::String::new(scope, "RSA import: PKCS8 export failed").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+    let result = v8::Object::new(scope);
+    let ml_key = v8::String::new(scope, "modulusLength").unwrap();
+    let ml_val = v8::Number::new(scope, modulus_length as f64);
+    result.set(scope, ml_key.into(), ml_val.into());
+    let pe_key = v8::String::new(scope, "publicExponent").unwrap();
+    let pe_val = vec_to_uint8_array(scope, public_exponent);
+    result.set(scope, pe_key.into(), pe_val.into());
+    let rd_key = v8::String::new(scope, "rawData").unwrap();
+    let rd_val = vec_to_uint8_array(scope, pkcs8_der);
+    result.set(scope, rd_key.into(), rd_val.into());
+    rv.set(result.into());
+}
+
+fn op_crypto_import_rsa_spki(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let spki = read_bytes(args.get(0)).unwrap_or_default();
+    let public_key = match rsa::RsaPublicKey::from_public_key_der(&spki) {
+        Ok(k) => k,
+        Err(_) => {
+            let msg = v8::String::new(scope, "RSA import: invalid SPKI data").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+    let modulus_length = public_key.n().bits() as u32;
+    let public_exponent = public_key.e().to_be_bytes_trimmed_vartime().to_vec();
+    let spki_der = match public_key.to_public_key_der() {
+        Ok(doc) => doc.as_bytes().to_vec(),
+        Err(_) => {
+            let msg = v8::String::new(scope, "RSA import: SPKI export failed").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+    let result = v8::Object::new(scope);
+    let ml_key = v8::String::new(scope, "modulusLength").unwrap();
+    let ml_val = v8::Number::new(scope, modulus_length as f64);
+    result.set(scope, ml_key.into(), ml_val.into());
+    let pe_key = v8::String::new(scope, "publicExponent").unwrap();
+    let pe_val = vec_to_uint8_array(scope, public_exponent);
+    result.set(scope, pe_key.into(), pe_val.into());
+    let rd_key = v8::String::new(scope, "rawData").unwrap();
+    let rd_val = vec_to_uint8_array(scope, spki_der);
+    result.set(scope, rd_key.into(), rd_val.into());
+    rv.set(result.into());
+}
+
+fn op_crypto_export_rsa_pkcs8(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    let private_key = match rsa::RsaPrivateKey::from_pkcs8_der(&key_data) {
+        Ok(k) => k,
+        Err(_) => {
+            let msg = v8::String::new(scope, "RSA export: invalid key data").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+    let pkcs8_der = match private_key.to_pkcs8_der() {
+        Ok(doc) => doc.as_bytes().to_vec(),
+        Err(_) => {
+            let msg = v8::String::new(scope, "RSA export: PKCS8 export failed").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+    rv.set(vec_to_uint8_array(scope, pkcs8_der).into());
+}
+
+fn op_crypto_export_rsa_spki(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    let public_key = match rsa::RsaPublicKey::from_public_key_der(&key_data) {
+        Ok(k) => k,
+        Err(_) => {
+            let msg = v8::String::new(scope, "RSA export: invalid key data").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+    let spki_der = match public_key.to_public_key_der() {
+        Ok(doc) => doc.as_bytes().to_vec(),
+        Err(_) => {
+            let msg = v8::String::new(scope, "RSA export: SPKI export failed").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+    rv.set(vec_to_uint8_array(scope, spki_der).into());
+}
+
+fn op_crypto_import_rsa_jwk(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use rsa::traits::PublicKeyParts;
+
+    let jwk = args.get(0);
+    let jwk = if jwk.is_object() {
+        v8::Local::<v8::Object>::try_from(jwk).unwrap()
+    } else {
+        let msg = v8::String::new(scope, "RSA JWK import: not an object").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    };
+
+    fn get_b64url_field(
+        scope: &mut v8::PinScope,
+        obj: v8::Local<v8::Object>,
+        key: &str,
+    ) -> Option<Vec<u8>> {
+        let key_str = v8::String::new(scope, key).unwrap();
+        let val = obj.get(scope, key_str.into())?;
+        if val.is_null_or_undefined() {
+            return None;
+        }
+        let s = val.to_rust_string_lossy(scope);
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        match base64::Engine::decode(&engine, &s) {
+            Ok(bytes) => Some(bytes),
+            Err(_) => {
+                let engine = base64::engine::general_purpose::STANDARD_NO_PAD;
+                match base64::Engine::decode(&engine, s) {
+                    Ok(bytes) => Some(bytes),
+                    Err(_) => None,
+                }
+            }
+        }
+    }
+
+    let n = match get_b64url_field(scope, jwk, "n") {
+        Some(v) => v,
+        None => {
+            let msg = v8::String::new(scope, "RSA JWK import: missing or invalid 'n'").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+    let e = match get_b64url_field(scope, jwk, "e") {
+        Some(v) => v,
+        None => {
+            let msg = v8::String::new(scope, "RSA JWK import: missing or invalid 'e'").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let d = get_b64url_field(scope, jwk, "d");
+
+    if let Some(d_bytes) = d {
+        let bits = (n.len() * 8) as u32;
+        let n_uint = match rsa::BoxedUint::from_be_slice(&n, bits) {
+            Ok(v) => v,
+            Err(_) => {
+                let msg = v8::String::new(scope, "RSA JWK import: invalid modulus").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        };
+        let e_uint = match rsa::BoxedUint::from_be_slice(&e, bits) {
+            Ok(v) => v,
+            Err(_) => {
+                let msg = v8::String::new(scope, "RSA JWK import: invalid exponent").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        };
+        let d_uint = match rsa::BoxedUint::from_be_slice(&d_bytes, bits) {
+            Ok(v) => v,
+            Err(_) => {
+                let msg = v8::String::new(scope, "RSA JWK import: invalid private exponent").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        };
+
+        let mut primes = Vec::new();
+        if let Some(p_bytes) = get_b64url_field(scope, jwk, "p") {
+            let p_bits = (p_bytes.len() * 8) as u32;
+            if let Ok(p_uint) = rsa::BoxedUint::from_be_slice(&p_bytes, p_bits) {
+                primes.push(p_uint);
+            }
+        }
+        if let Some(q_bytes) = get_b64url_field(scope, jwk, "q") {
+            let q_bits = (q_bytes.len() * 8) as u32;
+            if let Ok(q_uint) = rsa::BoxedUint::from_be_slice(&q_bytes, q_bits) {
+                primes.push(q_uint);
+            }
+        }
+
+        let private_key = match rsa::RsaPrivateKey::from_components(n_uint, e_uint, d_uint, primes) {
+            Ok(k) => k,
+            Err(_) => {
+                let msg = v8::String::new(scope, "RSA JWK import: invalid key components").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        };
+
+        let modulus_length = private_key.n().bits_vartime() as u32;
+        let public_exponent = private_key.e().to_be_bytes_trimmed_vartime().to_vec();
+        let pkcs8_der = match private_key.to_pkcs8_der() {
+            Ok(doc) => doc.as_bytes().to_vec(),
+            Err(_) => {
+                let msg = v8::String::new(scope, "RSA JWK import: PKCS8 export failed").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        };
+
+        let result = v8::Object::new(scope);
+        let kt_key = v8::String::new(scope, "keyType").unwrap();
+        let kt_val = v8::String::new(scope, "private").unwrap();
+        result.set(scope, kt_key.into(), kt_val.into());
+        let ml_key = v8::String::new(scope, "modulusLength").unwrap();
+        let ml_val = v8::Number::new(scope, modulus_length as f64);
+        result.set(scope, ml_key.into(), ml_val.into());
+        let pe_key = v8::String::new(scope, "publicExponent").unwrap();
+        let pe_val = vec_to_uint8_array(scope, public_exponent);
+        result.set(scope, pe_key.into(), pe_val.into());
+        let rd_key = v8::String::new(scope, "rawData").unwrap();
+        let rd_val = vec_to_uint8_array(scope, pkcs8_der);
+        result.set(scope, rd_key.into(), rd_val.into());
+        rv.set(result.into());
+    } else {
+        let bits = (n.len() * 8) as u32;
+        let n_uint = match rsa::BoxedUint::from_be_slice(&n, bits) {
+            Ok(v) => v,
+            Err(_) => {
+                let msg = v8::String::new(scope, "RSA JWK import: invalid modulus").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        };
+        let e_uint = match rsa::BoxedUint::from_be_slice(&e, bits) {
+            Ok(v) => v,
+            Err(_) => {
+                let msg = v8::String::new(scope, "RSA JWK import: invalid exponent").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        };
+        let public_key = match rsa::RsaPublicKey::new(n_uint, e_uint) {
+            Ok(k) => k,
+            Err(_) => {
+                let msg = v8::String::new(scope, "RSA JWK import: invalid public key").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        };
+
+        let modulus_length = public_key.n().bits_vartime() as u32;
+        let public_exponent = public_key.e().to_be_bytes_trimmed_vartime().to_vec();
+        let spki_der = match public_key.to_public_key_der() {
+            Ok(doc) => doc.as_bytes().to_vec(),
+            Err(_) => {
+                let msg = v8::String::new(scope, "RSA JWK import: SPKI export failed").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        };
+
+        let result = v8::Object::new(scope);
+        let kt_key = v8::String::new(scope, "keyType").unwrap();
+        let kt_val = v8::String::new(scope, "public").unwrap();
+        result.set(scope, kt_key.into(), kt_val.into());
+        let ml_key = v8::String::new(scope, "modulusLength").unwrap();
+        let ml_val = v8::Number::new(scope, modulus_length as f64);
+        result.set(scope, ml_key.into(), ml_val.into());
+        let pe_key = v8::String::new(scope, "publicExponent").unwrap();
+        let pe_val = vec_to_uint8_array(scope, public_exponent);
+        result.set(scope, pe_key.into(), pe_val.into());
+        let rd_key = v8::String::new(scope, "rawData").unwrap();
+        let rd_val = vec_to_uint8_array(scope, spki_der);
+        result.set(scope, rd_key.into(), rd_val.into());
+        rv.set(result.into());
+    }
+}
+
+fn op_crypto_export_rsa_jwk(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use rsa::traits::PublicKeyParts;
+    use rsa::traits::PrivateKeyParts;
+
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    let is_private = args.get(1).to_rust_string_lossy(scope) == "private";
+
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    if is_private {
+        let private_key = match rsa::RsaPrivateKey::from_pkcs8_der(&key_data) {
+            Ok(k) => k,
+            Err(_) => {
+                let msg = v8::String::new(scope, "RSA JWK export: invalid key data").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        };
+
+        let n_bytes = private_key.n().to_be_bytes_trimmed_vartime();
+        let e_bytes = private_key.e().to_be_bytes_trimmed_vartime();
+        let d_bytes = private_key.d().to_be_bytes_trimmed_vartime();
+
+        let result = v8::Object::new(scope);
+        let kty_key = v8::String::new(scope, "kty").unwrap();
+        let kty_val = v8::String::new(scope, "RSA").unwrap();
+        result.set(scope, kty_key.into(), kty_val.into());
+
+        let n_str = base64::Engine::encode(&engine, n_bytes.as_ref());
+        let n_key = v8::String::new(scope, "n").unwrap();
+        let n_val = v8::String::new(scope, &n_str).unwrap();
+        result.set(scope, n_key.into(), n_val.into());
+
+        let e_str = base64::Engine::encode(&engine, e_bytes.as_ref());
+        let e_key = v8::String::new(scope, "e").unwrap();
+        let e_val = v8::String::new(scope, &e_str).unwrap();
+        result.set(scope, e_key.into(), e_val.into());
+
+        let d_str = base64::Engine::encode(&engine, d_bytes.as_ref());
+        let d_key = v8::String::new(scope, "d").unwrap();
+        let d_val = v8::String::new(scope, &d_str).unwrap();
+        result.set(scope, d_key.into(), d_val.into());
+
+        let primes = private_key.primes();
+        if primes.len() >= 2 {
+            let p_bytes = primes[0].to_be_bytes_trimmed_vartime();
+            let q_bytes = primes[1].to_be_bytes_trimmed_vartime();
+            let p_str = base64::Engine::encode(&engine, p_bytes.as_ref());
+            let q_str = base64::Engine::encode(&engine, q_bytes.as_ref());
+            let p_key = v8::String::new(scope, "p").unwrap();
+            let p_val = v8::String::new(scope, &p_str).unwrap();
+            result.set(scope, p_key.into(), p_val.into());
+            let q_key = v8::String::new(scope, "q").unwrap();
+            let q_val = v8::String::new(scope, &q_str).unwrap();
+            result.set(scope, q_key.into(), q_val.into());
+        }
+
+        if let (Some(dp), Some(dq)) = (private_key.dp(), private_key.dq()) {
+            let dp_bytes = dp.to_be_bytes_trimmed_vartime();
+            let dq_bytes = dq.to_be_bytes_trimmed_vartime();
+            let dp_str = base64::Engine::encode(&engine, dp_bytes.as_ref());
+            let dq_str = base64::Engine::encode(&engine, dq_bytes.as_ref());
+            let dp_key = v8::String::new(scope, "dp").unwrap();
+            let dp_val = v8::String::new(scope, &dp_str).unwrap();
+            result.set(scope, dp_key.into(), dp_val.into());
+            let dq_key = v8::String::new(scope, "dq").unwrap();
+            let dq_val = v8::String::new(scope, &dq_str).unwrap();
+            result.set(scope, dq_key.into(), dq_val.into());
+        }
+
+        if let Some(qinv) = private_key.qinv() {
+            let qi_uint = qinv.retrieve();
+            let qi_bytes = qi_uint.to_be_bytes_trimmed_vartime();
+            let qi_str = base64::Engine::encode(&engine, qi_bytes.as_ref());
+            let qi_key = v8::String::new(scope, "qi").unwrap();
+            let qi_val = v8::String::new(scope, &qi_str).unwrap();
+            result.set(scope, qi_key.into(), qi_val.into());
+        }
+
+        rv.set(result.into());
+    } else {
+        let public_key = match rsa::RsaPublicKey::from_public_key_der(&key_data) {
+            Ok(k) => k,
+            Err(_) => {
+                let msg = v8::String::new(scope, "RSA JWK export: invalid key data").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        };
+
+        let n_bytes = public_key.n().to_be_bytes_trimmed_vartime();
+        let e_bytes = public_key.e().to_be_bytes_trimmed_vartime();
+
+        let result = v8::Object::new(scope);
+        let kty_key = v8::String::new(scope, "kty").unwrap();
+        let kty_val = v8::String::new(scope, "RSA").unwrap();
+        result.set(scope, kty_key.into(), kty_val.into());
+
+        let n_str = base64::Engine::encode(&engine, n_bytes.as_ref());
+        let n_key = v8::String::new(scope, "n").unwrap();
+        let n_val = v8::String::new(scope, &n_str).unwrap();
+        result.set(scope, n_key.into(), n_val.into());
+
+        let e_str = base64::Engine::encode(&engine, e_bytes.as_ref());
+        let e_key = v8::String::new(scope, "e").unwrap();
+        let e_val = v8::String::new(scope, &e_str).unwrap();
+        result.set(scope, e_key.into(), e_val.into());
+
+        rv.set(result.into());
+    }
+}
+
+fn op_crypto_sign_rsa(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use rsa::pkcs1v15::SigningKey;
+    use rsa::pss::SigningKey as PssSigningKey;
+    use rsa::signature::Signer;
+    use signature::SignatureEncoding;
+
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    let algorithm = args.get(1).to_rust_string_lossy(scope);
+    let hash_name = args.get(2).to_rust_string_lossy(scope);
+    let salt_length = args.get(3).uint32_value(scope).unwrap_or(0) as usize;
+    let data = read_bytes(args.get(4)).unwrap_or_default();
+
+    let private_key = match rsa::RsaPrivateKey::from_pkcs8_der(&key_data) {
+        Ok(k) => k,
+        Err(_) => {
+            let msg = v8::String::new(scope, "RSA sign: invalid key data").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let signature: Vec<u8> = match algorithm.as_str() {
+        "RSASSA-PKCS1-v1_5" => {
+            match hash_name.as_str() {
+                "SHA-1" => {
+                    let signing_key: SigningKey<sha1::Sha1> = SigningKey::new(private_key);
+                    signing_key.sign(&data).to_vec()
+                }
+                "SHA-256" => {
+                    let signing_key: SigningKey<sha2::Sha256> = SigningKey::new(private_key);
+                    signing_key.sign(&data).to_vec()
+                }
+                "SHA-384" => {
+                    let signing_key: SigningKey<sha2::Sha384> = SigningKey::new(private_key);
+                    signing_key.sign(&data).to_vec()
+                }
+                "SHA-512" => {
+                    let signing_key: SigningKey<sha2::Sha512> = SigningKey::new(private_key);
+                    signing_key.sign(&data).to_vec()
+                }
+                _ => {
+                    let msg = v8::String::new(scope, &format!("RSA sign: unsupported hash \"{hash_name}\"")).unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            }
+        }
+        "RSA-PSS" => {
+            use rand_core::UnwrapErr;
+            use getrandom::SysRng;
+            use rsa::signature::RandomizedSigner;
+            let mut rng = UnwrapErr(SysRng::default());
+            match hash_name.as_str() {
+                "SHA-1" => {
+                    let signing_key: PssSigningKey<sha1::Sha1> = PssSigningKey::new_with_salt_len(private_key, salt_length);
+                    let signature = signing_key.sign_with_rng(&mut rng, &data);
+                    signature.to_bytes().to_vec()
+                }
+                "SHA-256" => {
+                    let signing_key: PssSigningKey<sha2::Sha256> = PssSigningKey::new_with_salt_len(private_key, salt_length);
+                    let signature = signing_key.sign_with_rng(&mut rng, &data);
+                    signature.to_bytes().to_vec()
+                }
+                "SHA-384" => {
+                    let signing_key: PssSigningKey<sha2::Sha384> = PssSigningKey::new_with_salt_len(private_key, salt_length);
+                    let signature = signing_key.sign_with_rng(&mut rng, &data);
+                    signature.to_bytes().to_vec()
+                }
+                "SHA-512" => {
+                    let signing_key: PssSigningKey<sha2::Sha512> = PssSigningKey::new_with_salt_len(private_key, salt_length);
+                    let signature = signing_key.sign_with_rng(&mut rng, &data);
+                    signature.to_bytes().to_vec()
+                }
+                _ => {
+                    let msg = v8::String::new(scope, &format!("RSA-PSS sign: unsupported hash \"{hash_name}\"")).unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            }
+        }
+        _ => {
+            let msg = v8::String::new(scope, &format!("RSA sign: unsupported algorithm \"{algorithm}\"")).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    rv.set(vec_to_uint8_array(scope, signature).into());
+}
+
+fn op_crypto_verify_rsa(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use rsa::pkcs1v15::VerifyingKey;
+    use rsa::pss::VerifyingKey as PssVerifyingKey;
+    use rsa::signature::Verifier;
+
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    let algorithm = args.get(1).to_rust_string_lossy(scope);
+    let hash_name = args.get(2).to_rust_string_lossy(scope);
+    let salt_length = args.get(3).uint32_value(scope).unwrap_or(0) as usize;
+    let signature = read_bytes(args.get(4)).unwrap_or_default();
+    let data = read_bytes(args.get(5)).unwrap_or_default();
+
+    let public_key = match rsa::RsaPublicKey::from_public_key_der(&key_data) {
+        Ok(k) => k,
+        Err(_) => {
+            let msg = v8::String::new(scope, "RSA verify: invalid key data").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let verified = match algorithm.as_str() {
+        "RSASSA-PKCS1-v1_5" => {
+            let sig = match rsa::pkcs1v15::Signature::try_from(signature.as_slice()) {
+                Ok(s) => s,
+                Err(_) => {
+                    rv.set(v8::Boolean::new(scope, false).into());
+                    return;
+                }
+            };
+            match hash_name.as_str() {
+                "SHA-1" => {
+                    let vk: VerifyingKey<sha1::Sha1> = VerifyingKey::new(public_key);
+                    vk.verify(&data, &sig).is_ok()
+                }
+                "SHA-256" => {
+                    let vk: VerifyingKey<sha2::Sha256> = VerifyingKey::new(public_key);
+                    vk.verify(&data, &sig).is_ok()
+                }
+                "SHA-384" => {
+                    let vk: VerifyingKey<sha2::Sha384> = VerifyingKey::new(public_key);
+                    vk.verify(&data, &sig).is_ok()
+                }
+                "SHA-512" => {
+                    let vk: VerifyingKey<sha2::Sha512> = VerifyingKey::new(public_key);
+                    vk.verify(&data, &sig).is_ok()
+                }
+                _ => false,
+            }
+        }
+        "RSA-PSS" => {
+            let sig = match rsa::pss::Signature::try_from(signature.as_slice()) {
+                Ok(s) => s,
+                Err(_) => {
+                    rv.set(v8::Boolean::new(scope, false).into());
+                    return;
+                }
+            };
+            match hash_name.as_str() {
+                "SHA-1" => {
+                    let vk: PssVerifyingKey<sha1::Sha1> = PssVerifyingKey::new_with_salt_len(public_key, salt_length);
+                    vk.verify(&data, &sig).is_ok()
+                }
+                "SHA-256" => {
+                    let vk: PssVerifyingKey<sha2::Sha256> = PssVerifyingKey::new_with_salt_len(public_key, salt_length);
+                    vk.verify(&data, &sig).is_ok()
+                }
+                "SHA-384" => {
+                    let vk: PssVerifyingKey<sha2::Sha384> = PssVerifyingKey::new_with_salt_len(public_key, salt_length);
+                    vk.verify(&data, &sig).is_ok()
+                }
+                "SHA-512" => {
+                    let vk: PssVerifyingKey<sha2::Sha512> = PssVerifyingKey::new_with_salt_len(public_key, salt_length);
+                    vk.verify(&data, &sig).is_ok()
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+
+    rv.set(v8::Boolean::new(scope, verified).into());
+}
+
+fn op_crypto_encrypt_rsa_oaep(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use rsa::Oaep;
+    use rand_core::UnwrapErr;
+    use getrandom::SysRng;
+
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    let hash_name = args.get(1).to_rust_string_lossy(scope);
+    let label_val = args.get(2);
+    let data = read_bytes(args.get(3)).unwrap_or_default();
+
+    let public_key = match rsa::RsaPublicKey::from_public_key_der(&key_data) {
+        Ok(k) => k,
+        Err(_) => {
+            let msg = v8::String::new(scope, "RSA-OAEP encrypt: invalid key data").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let label: Vec<u8> = if label_val.is_null_or_undefined() {
+        Vec::new()
+    } else {
+        read_bytes(label_val).unwrap_or_default()
+    };
+
+    let mut rng = UnwrapErr(SysRng::default());
+
+    let ciphertext: Vec<u8> = match hash_name.as_str() {
+        "SHA-1" => {
+            let padding = if label.is_empty() {
+                Oaep::<sha1::Sha1>::new()
+            } else {
+                Oaep::<sha1::Sha1>::new_with_label(label.clone())
+            };
+            match public_key.encrypt(&mut rng, padding, &data) {
+                Ok(ct) => ct,
+                Err(_) => {
+                    let msg = v8::String::new(scope, "RSA-OAEP encrypt failed").unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            }
+        }
+        "SHA-256" => {
+            let padding = if label.is_empty() {
+                Oaep::<sha2::Sha256>::new()
+            } else {
+                Oaep::<sha2::Sha256>::new_with_label(label.clone())
+            };
+            match public_key.encrypt(&mut rng, padding, &data) {
+                Ok(ct) => ct,
+                Err(_) => {
+                    let msg = v8::String::new(scope, "RSA-OAEP encrypt failed").unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            }
+        }
+        "SHA-384" => {
+            let padding = if label.is_empty() {
+                Oaep::<sha2::Sha384>::new()
+            } else {
+                Oaep::<sha2::Sha384>::new_with_label(label.clone())
+            };
+            match public_key.encrypt(&mut rng, padding, &data) {
+                Ok(ct) => ct,
+                Err(_) => {
+                    let msg = v8::String::new(scope, "RSA-OAEP encrypt failed").unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            }
+        }
+        "SHA-512" => {
+            let padding = if label.is_empty() {
+                Oaep::<sha2::Sha512>::new()
+            } else {
+                Oaep::<sha2::Sha512>::new_with_label(label.clone())
+            };
+            match public_key.encrypt(&mut rng, padding, &data) {
+                Ok(ct) => ct,
+                Err(_) => {
+                    let msg = v8::String::new(scope, "RSA-OAEP encrypt failed").unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            }
+        }
+        _ => {
+            let msg = v8::String::new(scope, &format!("RSA-OAEP: unsupported hash \"{hash_name}\"")).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    rv.set(vec_to_uint8_array(scope, ciphertext).into());
+}
+
+fn op_crypto_decrypt_rsa_oaep(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use rsa::Oaep;
+
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    let hash_name = args.get(1).to_rust_string_lossy(scope);
+    let label_val = args.get(2);
+    let data = read_bytes(args.get(3)).unwrap_or_default();
+
+    let private_key = match rsa::RsaPrivateKey::from_pkcs8_der(&key_data) {
+        Ok(k) => k,
+        Err(_) => {
+            let msg = v8::String::new(scope, "RSA-OAEP decrypt: invalid key data").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let label: Vec<u8> = if label_val.is_null_or_undefined() {
+        Vec::new()
+    } else {
+        read_bytes(label_val).unwrap_or_default()
+    };
+
+    let plaintext: Result<Vec<u8>, rsa::Error> = match hash_name.as_str() {
+        "SHA-1" => {
+            let padding = if label.is_empty() {
+                Oaep::<sha1::Sha1>::new()
+            } else {
+                Oaep::<sha1::Sha1>::new_with_label(label.clone())
+            };
+            private_key.decrypt(padding, &data)
+        }
+        "SHA-256" => {
+            let padding = if label.is_empty() {
+                Oaep::<sha2::Sha256>::new()
+            } else {
+                Oaep::<sha2::Sha256>::new_with_label(label.clone())
+            };
+            private_key.decrypt(padding, &data)
+        }
+        "SHA-384" => {
+            let padding = if label.is_empty() {
+                Oaep::<sha2::Sha384>::new()
+            } else {
+                Oaep::<sha2::Sha384>::new_with_label(label.clone())
+            };
+            private_key.decrypt(padding, &data)
+        }
+        "SHA-512" => {
+            let padding = if label.is_empty() {
+                Oaep::<sha2::Sha512>::new()
+            } else {
+                Oaep::<sha2::Sha512>::new_with_label(label.clone())
+            };
+            private_key.decrypt(padding, &data)
+        }
+        _ => {
+            let msg = v8::String::new(scope, &format!("RSA-OAEP: unsupported hash \"{hash_name}\"")).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let plaintext = match plaintext {
+        Ok(p) => p,
+        Err(_) => {
+            let msg = v8::String::new(scope, "RSA-OAEP decryption failed").unwrap();
+            scope.throw_exception(v8::Exception::error(scope, msg));
+            return;
+        }
+    };
+
+    rv.set(vec_to_uint8_array(scope, plaintext).into());
+}
+
+// --- EC ops -----------------------------------------------------------------
+
+fn op_crypto_generate_ec_keypair(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use rand_core::UnwrapErr;
+    use getrandom::SysRng;
+    use elliptic_curve::Generate;
+
+    let named_curve = args.get(0).to_rust_string_lossy(scope);
+
+    let (private_bytes, public_bytes): (Vec<u8>, Vec<u8>) = match named_curve.as_str() {
+        "P-256" => {
+            let secret = p256::SecretKey::generate_from_rng(&mut UnwrapErr(SysRng::default()));
+            let public = secret.public_key();
+            (secret.to_bytes().to_vec(), public.to_sec1_bytes().to_vec())
+        }
+        "P-384" => {
+            let secret = p384::SecretKey::generate_from_rng(&mut UnwrapErr(SysRng::default()));
+            let public = secret.public_key();
+            (secret.to_bytes().to_vec(), public.to_sec1_bytes().to_vec())
+        }
+        "P-521" => {
+            let secret = p521::SecretKey::generate_from_rng(&mut UnwrapErr(SysRng::default()));
+            let public = secret.public_key();
+            (secret.to_bytes().to_vec(), public.to_sec1_bytes().to_vec())
+        }
+        _ => {
+            let msg = v8::String::new(scope, &format!("EC: unsupported curve \"{named_curve}\"")).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let result = v8::Object::new(scope);
+    let pk_key = v8::String::new(scope, "privateKey").unwrap();
+    let pk_val = vec_to_uint8_array(scope, private_bytes);
+    result.set(scope, pk_key.into(), pk_val.into());
+    let pub_key = v8::String::new(scope, "publicKey").unwrap();
+    let pub_val = vec_to_uint8_array(scope, public_bytes);
+    result.set(scope, pub_key.into(), pub_val.into());
+    rv.set(result.into());
+}
+
+fn op_crypto_import_ec_raw(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let named_curve = args.get(0).to_rust_string_lossy(scope);
+    let key_data = read_bytes(args.get(1)).unwrap_or_default();
+
+    let public_bytes = match named_curve.as_str() {
+        "P-256" => {
+            let pk = p256::PublicKey::from_sec1_bytes(&key_data).map_err(|_| ());
+            pk.map(|k| k.to_sec1_bytes().to_vec())
+        }
+        "P-384" => {
+            let pk = p384::PublicKey::from_sec1_bytes(&key_data).map_err(|_| ());
+            pk.map(|k| k.to_sec1_bytes().to_vec())
+        }
+        "P-521" => {
+            let pk = p521::PublicKey::from_sec1_bytes(&key_data).map_err(|_| ());
+            pk.map(|k| k.to_sec1_bytes().to_vec())
+        }
+        _ => Err(()),
+    };
+
+    match public_bytes {
+        Ok(bytes) => rv.set(vec_to_uint8_array(scope, bytes).into()),
+        Err(_) => {
+            let msg = v8::String::new(scope, "EC import: invalid raw key data").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    }
+}
+
+fn op_crypto_import_ec_pkcs8(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let named_curve = args.get(0).to_rust_string_lossy(scope);
+    let key_data = read_bytes(args.get(1)).unwrap_or_default();
+
+    let private_bytes = match named_curve.as_str() {
+        "P-256" => {
+            let sk = p256::SecretKey::from_pkcs8_der(&key_data).map_err(|_| ());
+            sk.map(|k| k.to_bytes().to_vec())
+        }
+        "P-384" => {
+            let sk = p384::SecretKey::from_pkcs8_der(&key_data).map_err(|_| ());
+            sk.map(|k| k.to_bytes().to_vec())
+        }
+        "P-521" => {
+            let sk = p521::SecretKey::from_pkcs8_der(&key_data).map_err(|_| ());
+            sk.map(|k| k.to_bytes().to_vec())
+        }
+        _ => Err(()),
+    };
+
+    match private_bytes {
+        Ok(bytes) => rv.set(vec_to_uint8_array(scope, bytes).into()),
+        Err(_) => {
+            let msg = v8::String::new(scope, "EC import: invalid PKCS8 data").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+        }
+    }
+}
+
+fn op_crypto_import_ec_spki(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let named_curve = args.get(0).to_rust_string_lossy(scope);
+    let key_data = read_bytes(args.get(1)).unwrap_or_default();
+
+    let public_bytes = match named_curve.as_str() {
+        "P-256" => {
+            let pk = p256::PublicKey::from_public_key_der(&key_data).map_err(|_| ());
+            pk.map(|k| k.to_sec1_bytes().to_vec())
+        }
+        "P-384" => {
+            let pk = p384::PublicKey::from_public_key_der(&key_data).map_err(|_| ());
+            pk.map(|k| k.to_sec1_bytes().to_vec())
+        }
+        "P-521" => {
+            let pk = p521::PublicKey::from_public_key_der(&key_data).map_err(|_| ());
+            pk.map(|k| k.to_sec1_bytes().to_vec())
+        }
+        _ => Err(()),
+    };
+
+    match public_bytes {
+        Ok(bytes) => rv.set(vec_to_uint8_array(scope, bytes).into()),
+        Err(_) => {
+            let msg = v8::String::new(scope, "EC import: invalid SPKI data").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+        }
+    }
+}
+
+fn op_crypto_export_ec_raw(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let _named_curve = args.get(0).to_rust_string_lossy(scope);
+    let key_data = read_bytes(args.get(1)).unwrap_or_default();
+    rv.set(vec_to_uint8_array(scope, key_data).into());
+}
+
+fn op_crypto_export_ec_pkcs8(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let named_curve = args.get(0).to_rust_string_lossy(scope);
+    let key_data = read_bytes(args.get(1)).unwrap_or_default();
+
+    let pkcs8_der = match named_curve.as_str() {
+        "P-256" => {
+            let sk = p256::SecretKey::from_slice(key_data.as_slice()).map_err(|_| ());
+            sk.and_then(|k| k.to_pkcs8_der().map(|d| d.as_bytes().to_vec()).map_err(|_| ()))
+        }
+        "P-384" => {
+            let sk = p384::SecretKey::from_slice(key_data.as_slice()).map_err(|_| ());
+            sk.and_then(|k| k.to_pkcs8_der().map(|d| d.as_bytes().to_vec()).map_err(|_| ()))
+        }
+        "P-521" => {
+            let sk = p521::SecretKey::from_slice(key_data.as_slice()).map_err(|_| ());
+            sk.and_then(|k| k.to_pkcs8_der().map(|d| d.as_bytes().to_vec()).map_err(|_| ()))
+        }
+        _ => Err(()),
+    };
+
+    match pkcs8_der {
+        Ok(bytes) => rv.set(vec_to_uint8_array(scope, bytes).into()),
+        Err(_) => {
+            let msg = v8::String::new(scope, "EC export: invalid key data").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+        }
+    }
+}
+
+fn op_crypto_export_ec_spki(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let named_curve = args.get(0).to_rust_string_lossy(scope);
+    let key_data = read_bytes(args.get(1)).unwrap_or_default();
+
+    let spki_der = match named_curve.as_str() {
+        "P-256" => {
+            let pk = p256::PublicKey::from_sec1_bytes(&key_data).map_err(|_| ());
+            pk.and_then(|k| k.to_public_key_der().map(|d| d.as_bytes().to_vec()).map_err(|_| ()))
+        }
+        "P-384" => {
+            let pk = p384::PublicKey::from_sec1_bytes(&key_data).map_err(|_| ());
+            pk.and_then(|k| k.to_public_key_der().map(|d| d.as_bytes().to_vec()).map_err(|_| ()))
+        }
+        "P-521" => {
+            let pk = p521::PublicKey::from_sec1_bytes(&key_data).map_err(|_| ());
+            pk.and_then(|k| k.to_public_key_der().map(|d| d.as_bytes().to_vec()).map_err(|_| ()))
+        }
+        _ => Err(()),
+    };
+
+    match spki_der {
+        Ok(bytes) => rv.set(vec_to_uint8_array(scope, bytes).into()),
+        Err(_) => {
+            let msg = v8::String::new(scope, "EC export: invalid key data").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+        }
+    }
+}
+
+fn op_crypto_ec_public_from_private(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let named_curve = args.get(0).to_rust_string_lossy(scope);
+    let key_data = read_bytes(args.get(1)).unwrap_or_default();
+
+    let public_bytes = match named_curve.as_str() {
+        "P-256" => {
+            let sk = p256::SecretKey::from_slice(key_data.as_slice()).map_err(|_| ());
+            sk.map(|k| k.public_key().to_sec1_bytes().to_vec())
+        }
+        "P-384" => {
+            let sk = p384::SecretKey::from_slice(key_data.as_slice()).map_err(|_| ());
+            sk.map(|k| k.public_key().to_sec1_bytes().to_vec())
+        }
+        "P-521" => {
+            let sk = p521::SecretKey::from_slice(key_data.as_slice()).map_err(|_| ());
+            sk.map(|k| k.public_key().to_sec1_bytes().to_vec())
+        }
+        _ => Err(()),
+    };
+
+    match public_bytes {
+        Ok(bytes) => rv.set(vec_to_uint8_array(scope, bytes).into()),
+        Err(_) => {
+            let msg = v8::String::new(scope, "EC public from private: invalid key data").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+        }
+    }
+}
+
+fn op_crypto_import_ec_jwk_private(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let named_curve = args.get(0).to_rust_string_lossy(scope);
+    let key_data = read_bytes(args.get(1)).unwrap_or_default();
+
+    let private_bytes = match named_curve.as_str() {
+        "P-256" => {
+            let sk = p256::SecretKey::from_slice(key_data.as_slice()).map_err(|_| ());
+            sk.map(|k| k.to_bytes().to_vec())
+        }
+        "P-384" => {
+            let sk = p384::SecretKey::from_slice(key_data.as_slice()).map_err(|_| ());
+            sk.map(|k| k.to_bytes().to_vec())
+        }
+        "P-521" => {
+            let sk = p521::SecretKey::from_slice(key_data.as_slice()).map_err(|_| ());
+            sk.map(|k| k.to_bytes().to_vec())
+        }
+        _ => Err(()),
+    };
+
+    match private_bytes {
+        Ok(bytes) => rv.set(vec_to_uint8_array(scope, bytes).into()),
+        Err(_) => {
+            let msg = v8::String::new(scope, "EC JWK import: invalid private key data").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+        }
+    }
+}
+
+fn op_crypto_sign_ecdsa(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use rand_core::UnwrapErr;
+    use getrandom::SysRng;
+    use sha1::Digest as _;
+    use signature::hazmat::RandomizedPrehashSigner;
+
+    let named_curve = args.get(0).to_rust_string_lossy(scope);
+    let hash_name = args.get(1).to_rust_string_lossy(scope);
+    let key_data = read_bytes(args.get(2)).unwrap_or_default();
+    let data = read_bytes(args.get(3)).unwrap_or_default();
+
+    let prehash: Vec<u8> = match hash_name.as_str() {
+        "SHA-1" => sha1::Sha1::digest(&data).to_vec(),
+        "SHA-256" => sha2::Sha256::digest(&data).to_vec(),
+        "SHA-384" => sha2::Sha384::digest(&data).to_vec(),
+        "SHA-512" => sha2::Sha512::digest(&data).to_vec(),
+        _ => {
+            let msg = v8::String::new(scope, &format!("ECDSA sign: unsupported hash \"{hash_name}\"")).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let signature: Vec<u8> = match named_curve.as_str() {
+        "P-256" => {
+            let secret = match p256::SecretKey::from_slice(key_data.as_slice()) {
+                Ok(s) => s,
+                Err(_) => {
+                    let msg = v8::String::new(scope, "ECDSA sign: invalid private key").unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            };
+            let signing_key = p256::ecdsa::SigningKey::from(&secret);
+            let mut rng = UnwrapErr(SysRng::default());
+            let sig: p256::ecdsa::Signature = signing_key.sign_prehash_with_rng(&mut rng, &prehash).unwrap();
+            sig.to_bytes().to_vec()
+        }
+        "P-384" => {
+            let secret = match p384::SecretKey::from_slice(key_data.as_slice()) {
+                Ok(s) => s,
+                Err(_) => {
+                    let msg = v8::String::new(scope, "ECDSA sign: invalid private key").unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            };
+            let signing_key = p384::ecdsa::SigningKey::from(&secret);
+            let mut rng = UnwrapErr(SysRng::default());
+            let sig: p384::ecdsa::Signature = signing_key.sign_prehash_with_rng(&mut rng, &prehash).unwrap();
+            sig.to_bytes().to_vec()
+        }
+        "P-521" => {
+            let secret = match p521::SecretKey::from_slice(key_data.as_slice()) {
+                Ok(s) => s,
+                Err(_) => {
+                    let msg = v8::String::new(scope, "ECDSA sign: invalid private key").unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            };
+            let signing_key = p521::ecdsa::SigningKey::from(&secret);
+            let mut rng = UnwrapErr(SysRng::default());
+            let prehash_p521 = if prehash.len() < 33 {
+                let mut padded = vec![0u8; 33 - prehash.len()];
+                padded.extend_from_slice(&prehash);
+                padded
+            } else {
+                prehash
+            };
+            let sig: p521::ecdsa::Signature = signing_key.sign_prehash_with_rng(&mut rng, &prehash_p521).unwrap();
+            sig.to_bytes().to_vec()
+        }
+        _ => {
+            let msg = v8::String::new(scope, &format!("ECDSA sign: unsupported curve \"{named_curve}\"")).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    rv.set(vec_to_uint8_array(scope, signature).into());
+}
+
+fn op_crypto_verify_ecdsa(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use sha1::Digest as _;
+    use signature::hazmat::PrehashVerifier;
+
+    let named_curve = args.get(0).to_rust_string_lossy(scope);
+    let hash_name = args.get(1).to_rust_string_lossy(scope);
+    let key_data = read_bytes(args.get(2)).unwrap_or_default();
+    let signature = read_bytes(args.get(3)).unwrap_or_default();
+    let data = read_bytes(args.get(4)).unwrap_or_default();
+
+    let prehash: Vec<u8> = match hash_name.as_str() {
+        "SHA-1" => sha1::Sha1::digest(&data).to_vec(),
+        "SHA-256" => sha2::Sha256::digest(&data).to_vec(),
+        "SHA-384" => sha2::Sha384::digest(&data).to_vec(),
+        "SHA-512" => sha2::Sha512::digest(&data).to_vec(),
+        _ => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+
+    let verified = match named_curve.as_str() {
+        "P-256" => {
+            let public = match p256::PublicKey::from_sec1_bytes(&key_data) {
+                Ok(pk) => pk,
+                Err(_) => {
+                    rv.set(v8::Boolean::new(scope, false).into());
+                    return;
+                }
+            };
+            let verifying_key = p256::ecdsa::VerifyingKey::from(&public);
+            match p256::ecdsa::Signature::from_slice(&signature) {
+                Ok(s) => verifying_key.verify_prehash(&prehash, &s).is_ok(),
+                Err(_) => false,
+            }
+        }
+        "P-384" => {
+            let public = match p384::PublicKey::from_sec1_bytes(&key_data) {
+                Ok(pk) => pk,
+                Err(_) => {
+                    rv.set(v8::Boolean::new(scope, false).into());
+                    return;
+                }
+            };
+            let verifying_key = p384::ecdsa::VerifyingKey::from(&public);
+            match p384::ecdsa::Signature::from_slice(&signature) {
+                Ok(s) => verifying_key.verify_prehash(&prehash, &s).is_ok(),
+                Err(_) => false,
+            }
+        }
+        "P-521" => {
+            let public = match p521::PublicKey::from_sec1_bytes(&key_data) {
+                Ok(pk) => pk,
+                Err(_) => {
+                    rv.set(v8::Boolean::new(scope, false).into());
+                    return;
+                }
+            };
+            let verifying_key = p521::ecdsa::VerifyingKey::from(&public);
+            let prehash_p521 = if prehash.len() < 33 {
+                let mut padded = vec![0u8; 33 - prehash.len()];
+                padded.extend_from_slice(&prehash);
+                padded
+            } else {
+                prehash
+            };
+            match p521::ecdsa::Signature::from_slice(&signature) {
+                Ok(s) => verifying_key.verify_prehash(&prehash_p521, &s).is_ok(),
+                Err(_) => false,
+            }
+        }
+        _ => false,
+    };
+
+    rv.set(v8::Boolean::new(scope, verified).into());
+}
+
+fn op_crypto_derive_bits_ecdh(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use elliptic_curve::ecdh::diffie_hellman;
+
+    let named_curve = args.get(0).to_rust_string_lossy(scope);
+    let private_key_data = read_bytes(args.get(1)).unwrap_or_default();
+    let public_key_data = read_bytes(args.get(2)).unwrap_or_default();
+    let length = args.get(3).uint32_value(scope).unwrap_or(0) as usize;
+
+    let shared_secret: Vec<u8> = match named_curve.as_str() {
+        "P-256" => {
+            let secret = match p256::SecretKey::from_slice(private_key_data.as_slice()) {
+                Ok(s) => s,
+                Err(_) => {
+                    let msg = v8::String::new(scope, "ECDH: invalid private key").unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            };
+            let public = match p256::PublicKey::from_sec1_bytes(&public_key_data) {
+                Ok(p) => p,
+                Err(_) => {
+                    let msg = v8::String::new(scope, "ECDH: invalid public key").unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            };
+            let shared = diffie_hellman(secret.to_nonzero_scalar(), public.as_affine());
+            shared.raw_secret_bytes().to_vec()
+        }
+        "P-384" => {
+            let secret = match p384::SecretKey::from_slice(private_key_data.as_slice()) {
+                Ok(s) => s,
+                Err(_) => {
+                    let msg = v8::String::new(scope, "ECDH: invalid private key").unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            };
+            let public = match p384::PublicKey::from_sec1_bytes(&public_key_data) {
+                Ok(p) => p,
+                Err(_) => {
+                    let msg = v8::String::new(scope, "ECDH: invalid public key").unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            };
+            let shared = diffie_hellman(secret.to_nonzero_scalar(), public.as_affine());
+            shared.raw_secret_bytes().to_vec()
+        }
+        "P-521" => {
+            let secret = match p521::SecretKey::from_slice(private_key_data.as_slice()) {
+                Ok(s) => s,
+                Err(_) => {
+                    let msg = v8::String::new(scope, "ECDH: invalid private key").unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            };
+            let public = match p521::PublicKey::from_sec1_bytes(&public_key_data) {
+                Ok(p) => p,
+                Err(_) => {
+                    let msg = v8::String::new(scope, "ECDH: invalid public key").unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            };
+            let shared = diffie_hellman(secret.to_nonzero_scalar(), public.as_affine());
+            shared.raw_secret_bytes().to_vec()
+        }
+        _ => {
+            let msg = v8::String::new(scope, &format!("ECDH: unsupported curve \"{named_curve}\"")).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    if length > 0 && length < shared_secret.len() * 8 {
+        let byte_len = (length + 7) / 8;
+        rv.set(vec_to_uint8_array(scope, shared_secret[..byte_len].to_vec()).into());
+    } else {
+        rv.set(vec_to_uint8_array(scope, shared_secret).into());
+    }
+}
+
+// --- Ed25519 / X25519 ops ---------------------------------------------------
+
+fn op_crypto_generate_ed25519_keypair(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
+    let _ = args;
+    let mut rng = OsRng;
+    let signing_key = SigningKey::generate(&mut rng);
+    let verifying_key = signing_key.verifying_key();
+
+    let result = v8::Object::new(scope);
+    let pk_key = v8::String::new(scope, "privateKey").unwrap();
+    let pk_val = vec_to_uint8_array(scope, signing_key.to_bytes().to_vec());
+    result.set(scope, pk_key.into(), pk_val.into());
+    let pub_key = v8::String::new(scope, "publicKey").unwrap();
+    let pub_val = vec_to_uint8_array(scope, verifying_key.to_bytes().to_vec());
+    result.set(scope, pub_key.into(), pub_val.into());
+    rv.set(result.into());
+}
+
+fn op_crypto_import_spki_ed25519(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+
+    let spki = read_bytes(args.get(0)).unwrap_or_default();
+    let out: v8::Local<v8::Uint8Array> = match args.get(1).try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+
+    let spki_obj = match spki::SubjectPublicKeyInfoRef::try_from(spki.as_slice()) {
+        Ok(s) => s,
+        Err(_) => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+
+    let public_key = match spki_obj.subject_public_key.as_bytes() {
+        Some(b) => b,
+        None => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+    if public_key.len() != 32 {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    }
+
+    let out_len = out.byte_length();
+    if out_len < 32 {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    }
+
+    let data = out.data();
+    if !data.is_null() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(public_key.as_ptr(), data as *mut u8, 32);
+        }
+    }
+    rv.set(v8::Boolean::new(scope, true).into());
+}
+
+fn op_crypto_import_pkcs8_ed25519(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+
+    let pkcs8 = read_bytes(args.get(0)).unwrap_or_default();
+    let out: v8::Local<v8::Uint8Array> = match args.get(1).try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+
+    let pki = match pkcs8::PrivateKeyInfoRef::try_from(pkcs8.as_slice()) {
+        Ok(p) => p,
+        Err(_) => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+
+    let private_key_octets = pki.private_key.as_bytes();
+    if private_key_octets.len() < 32 {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    }
+
+    let private_bytes = &private_key_octets[private_key_octets.len() - 32..];
+    if private_bytes.len() != 32 {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    }
+
+    let out_len = out.byte_length();
+    if out_len < 32 {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    }
+
+    let data = out.data();
+    if !data.is_null() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(private_bytes.as_ptr(), data as *mut u8, 32);
+        }
+    }
+    rv.set(v8::Boolean::new(scope, true).into());
+}
+
+fn op_crypto_export_spki_ed25519(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use pkcs8::der::Encode as _;
+
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    if key_data.len() != 32 {
+        let msg = v8::String::new(scope, "Ed25519 SPKI export: invalid key length").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    let alg_id = spki::AlgorithmIdentifier::<spki::der::Any> {
+        oid: spki::ObjectIdentifier::new_unwrap("1.3.101.112"),
+        parameters: None,
+    };
+
+    let bit_string = match spki::der::asn1::BitString::from_bytes(&key_data) {
+        Ok(b) => b,
+        Err(_) => {
+            let msg = v8::String::new(scope, "Ed25519 SPKI export: bit string failed").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+    let spki_obj = spki::SubjectPublicKeyInfo::<spki::der::Any, spki::der::asn1::BitString> {
+        algorithm: alg_id,
+        subject_public_key: bit_string,
+    };
+
+    match spki_obj.to_der() {
+        Ok(der) => rv.set(vec_to_uint8_array(scope, der).into()),
+        Err(_) => {
+            let msg = v8::String::new(scope, "Ed25519 SPKI export failed").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+        }
+    }
+}
+
+fn op_crypto_export_pkcs8_ed25519(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use pkcs8::der::Encode as _;
+
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    if key_data.len() != 32 {
+        let msg = v8::String::new(scope, "Ed25519 PKCS8 export: invalid key length").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    let alg_id = spki::AlgorithmIdentifier::<spki::der::Any> {
+        oid: spki::ObjectIdentifier::new_unwrap("1.3.101.112"),
+        parameters: None,
+    };
+
+    let private_key_octet = match pkcs8::der::asn1::OctetString::new(key_data) {
+        Ok(o) => o,
+        Err(_) => {
+            let msg = v8::String::new(scope, "Ed25519 PKCS8 export: octet string failed").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let pk_info = pkcs8::PrivateKeyInfoOwned::new(alg_id, private_key_octet);
+
+    match pk_info.to_der() {
+        Ok(der) => rv.set(vec_to_uint8_array(scope, der).into()),
+        Err(_) => {
+            let msg = v8::String::new(scope, "Ed25519 PKCS8 export failed").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+        }
+    }
+}
+
+fn op_crypto_jwk_x_ed25519(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    let signing_key = match key_data.as_slice().try_into() {
+        Ok(bytes) => ed25519_dalek::SigningKey::from_bytes(bytes),
+        Err(_) => {
+            let msg = v8::String::new(scope, "Ed25519 JWK: invalid key length").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+    let verifying_key = signing_key.verifying_key();
+    let public_bytes = verifying_key.to_bytes();
+    rv.set(v8::String::new(scope, &base64url_encode(&public_bytes)).unwrap().into());
+}
+
+fn op_crypto_sign_ed25519(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use ed25519_dalek::Signer;
+
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    let data = read_bytes(args.get(1)).unwrap_or_default();
+    let out: v8::Local<v8::Uint8Array> = match args.get(2).try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            let msg = v8::String::new(scope, "Ed25519 sign: invalid output buffer").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+    let signing_key = match key_data.as_slice().try_into() {
+        Ok(bytes) => ed25519_dalek::SigningKey::from_bytes(bytes),
+        Err(_) => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+    let signature = signing_key.sign(&data);
+
+    let out_len = out.byte_length();
+    if out_len < 64 {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    }
+
+    let data_ptr = out.data();
+    if !data_ptr.is_null() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(signature.to_bytes().as_ptr(), data_ptr as *mut u8, 64);
+        }
+    }
+    rv.set(v8::Boolean::new(scope, true).into());
+}
+
+fn op_crypto_verify_ed25519(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use ed25519_dalek::Verifier;
+
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    let data = read_bytes(args.get(1)).unwrap_or_default();
+    let signature = read_bytes(args.get(2)).unwrap_or_default();
+
+    let public_key = match key_data.as_slice().try_into() {
+        Ok(bytes) => match ed25519_dalek::VerifyingKey::from_bytes(bytes) {
+            Ok(k) => k,
+            Err(_) => {
+                rv.set(v8::Boolean::new(scope, false).into());
+                return;
+            }
+        },
+        Err(_) => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+
+    let sig = match ed25519_dalek::Signature::from_slice(&signature) {
+        Ok(s) => s,
+        Err(_) => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+
+    let verified = public_key.verify(&data, &sig).is_ok();
+    rv.set(v8::Boolean::new(scope, verified).into());
+}
+
+// --- X25519 ops -------------------------------------------------------------
+
+fn op_crypto_generate_x25519_keypair(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use rand::rngs::OsRng;
+    use rand::RngCore;
+
+    let _ = args;
+    let mut private_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut private_bytes);
+    let public_bytes = x25519_dalek::x25519(private_bytes, x25519_dalek::X25519_BASEPOINT_BYTES);
+
+    let result = v8::Object::new(scope);
+    let pk_key = v8::String::new(scope, "privateKey").unwrap();
+    let pk_val = vec_to_uint8_array(scope, private_bytes.to_vec());
+    result.set(scope, pk_key.into(), pk_val.into());
+    let pub_key = v8::String::new(scope, "publicKey").unwrap();
+    let pub_val = vec_to_uint8_array(scope, public_bytes.to_vec());
+    result.set(scope, pub_key.into(), pub_val.into());
+    rv.set(result.into());
+}
+
+fn op_crypto_import_spki_x25519(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+
+    let spki = read_bytes(args.get(0)).unwrap_or_default();
+    let out: v8::Local<v8::Uint8Array> = match args.get(1).try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+
+    let spki_obj = match spki::SubjectPublicKeyInfoRef::try_from(spki.as_slice()) {
+        Ok(s) => s,
+        Err(_) => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+
+    let public_key = match spki_obj.subject_public_key.as_bytes() {
+        Some(b) => b,
+        None => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+    if public_key.len() != 32 {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    }
+
+    let out_len = out.byte_length();
+    if out_len < 32 {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    }
+
+    let data = out.data();
+    if !data.is_null() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(public_key.as_ptr(), data as *mut u8, 32);
+        }
+    }
+    rv.set(v8::Boolean::new(scope, true).into());
+}
+
+fn op_crypto_import_pkcs8_x25519(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+
+    let pkcs8 = read_bytes(args.get(0)).unwrap_or_default();
+    let out: v8::Local<v8::Uint8Array> = match args.get(1).try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+
+    let pki = match pkcs8::PrivateKeyInfoRef::try_from(pkcs8.as_slice()) {
+        Ok(p) => p,
+        Err(_) => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+
+    let private_key_octets = pki.private_key.as_bytes();
+    if private_key_octets.len() < 32 {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    }
+
+    let private_bytes = &private_key_octets[private_key_octets.len() - 32..];
+    if private_bytes.len() != 32 {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    }
+
+    let out_len = out.byte_length();
+    if out_len < 32 {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    }
+
+    let data = out.data();
+    if !data.is_null() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(private_bytes.as_ptr(), data as *mut u8, 32);
+        }
+    }
+    rv.set(v8::Boolean::new(scope, true).into());
+}
+
+fn op_crypto_export_spki_x25519(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use pkcs8::der::Encode as _;
+
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+
+    let alg_id = spki::AlgorithmIdentifier::<spki::der::Any> {
+        oid: spki::ObjectIdentifier::new_unwrap("1.3.101.110"),
+        parameters: None,
+    };
+
+    let bit_string = match spki::der::asn1::BitString::from_bytes(&key_data) {
+        Ok(b) => b,
+        Err(_) => {
+            let msg = v8::String::new(scope, "X25519 SPKI export: bit string failed").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+    let spki_obj = spki::SubjectPublicKeyInfo::<spki::der::Any, spki::der::asn1::BitString> {
+        algorithm: alg_id,
+        subject_public_key: bit_string,
+    };
+
+    match spki_obj.to_der() {
+        Ok(der) => rv.set(vec_to_uint8_array(scope, der).into()),
+        Err(_) => {
+            let msg = v8::String::new(scope, "X25519 SPKI export failed").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+        }
+    }
+}
+
+fn op_crypto_export_pkcs8_x25519(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use pkcs8::der::Encode as _;
+
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+
+    let alg_id = spki::AlgorithmIdentifier::<spki::der::Any> {
+        oid: spki::ObjectIdentifier::new_unwrap("1.3.101.110"),
+        parameters: None,
+    };
+
+    let private_key_octet = match pkcs8::der::asn1::OctetString::new(key_data) {
+        Ok(o) => o,
+        Err(_) => {
+            let msg = v8::String::new(scope, "X25519 PKCS8 export: octet string failed").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let pk_info = pkcs8::PrivateKeyInfoOwned::new(alg_id, private_key_octet);
+
+    match pk_info.to_der() {
+        Ok(der) => rv.set(vec_to_uint8_array(scope, der).into()),
+        Err(_) => {
+            let msg = v8::String::new(scope, "X25519 PKCS8 export failed").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+        }
+    }
+}
+
+fn op_crypto_x25519_public_key(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    let private_bytes: [u8; 32] = match key_data.as_slice().try_into() {
+        Ok(b) => b,
+        Err(_) => {
+            let msg = v8::String::new(scope, "X25519: invalid key length").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+    let public_bytes = x25519_dalek::x25519(private_bytes, x25519_dalek::X25519_BASEPOINT_BYTES);
+    rv.set(vec_to_uint8_array(scope, public_bytes.to_vec()).into());
+}
+
+fn op_crypto_derive_bits_x25519(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let private_key_data = read_bytes(args.get(0)).unwrap_or_default();
+    let public_key_data = read_bytes(args.get(1)).unwrap_or_default();
+    let out: v8::Local<v8::Uint8Array> = match args.get(2).try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            let msg = v8::String::new(scope, "X25519 deriveBits: invalid output buffer").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let private_bytes: [u8; 32] = match private_key_data.as_slice().try_into() {
+        Ok(b) => b,
+        Err(_) => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+    let public_bytes: [u8; 32] = match public_key_data.as_slice().try_into() {
+        Ok(b) => b,
+        Err(_) => {
+            rv.set(v8::Boolean::new(scope, false).into());
+            return;
+        }
+    };
+
+    let shared_bytes = x25519_dalek::x25519(private_bytes, public_bytes);
+
+    let out_len = out.byte_length();
+    if out_len < 32 {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    }
+
+    let data = out.data();
+    if !data.is_null() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(shared_bytes.as_ptr(), data as *mut u8, 32);
+        }
+    }
+    rv.set(v8::Boolean::new(scope, true).into());
+}
+
+// --- HKDF / PBKDF2 ops ------------------------------------------------------
+
+fn op_crypto_derive_bits_hkdf(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use hkdf::Hkdf;
+
+    let hash_name = args.get(0).to_rust_string_lossy(scope);
+    let key_data = read_bytes(args.get(1)).unwrap_or_default();
+    let salt = read_bytes(args.get(2)).unwrap_or_default();
+    let info = read_bytes(args.get(3)).unwrap_or_default();
+    let length = args.get(4).uint32_value(scope).unwrap_or(0) as usize;
+
+    if length == 0 {
+        rv.set(vec_to_uint8_array(scope, Vec::new()).into());
+        return;
+    }
+
+    let okm: Result<Vec<u8>, String> = match hash_name.as_str() {
+        "SHA-1" => {
+            let h = Hkdf::<sha1::Sha1>::new(Some(&salt), &key_data);
+            let mut out = vec![0u8; length];
+            h.expand(&info, &mut out).map_err(|e| e.to_string()).map(|_| out)
+        }
+        "SHA-256" => {
+            let h = Hkdf::<sha2::Sha256>::new(Some(&salt), &key_data);
+            let mut out = vec![0u8; length];
+            h.expand(&info, &mut out).map_err(|e| e.to_string()).map(|_| out)
+        }
+        "SHA-384" => {
+            let h = Hkdf::<sha2::Sha384>::new(Some(&salt), &key_data);
+            let mut out = vec![0u8; length];
+            h.expand(&info, &mut out).map_err(|e| e.to_string()).map(|_| out)
+        }
+        "SHA-512" => {
+            let h = Hkdf::<sha2::Sha512>::new(Some(&salt), &key_data);
+            let mut out = vec![0u8; length];
+            h.expand(&info, &mut out).map_err(|e| e.to_string()).map(|_| out)
+        }
+        _ => Err(format!("HKDF: unsupported hash \"{hash_name}\"")),
+    };
+
+    match okm {
+        Ok(bytes) => rv.set(vec_to_uint8_array(scope, bytes).into()),
+        Err(e) => {
+            let msg = v8::String::new(scope, &format!("HKDF: {e}")).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+        }
+    }
+}
+
+fn op_crypto_derive_bits_pbkdf2(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use pbkdf2::pbkdf2_hmac;
+
+    let hash_name = args.get(0).to_rust_string_lossy(scope);
+    let key_data = read_bytes(args.get(1)).unwrap_or_default();
+    let salt = read_bytes(args.get(2)).unwrap_or_default();
+    let iterations = args.get(3).uint32_value(scope).unwrap_or(0) as u32;
+    let length = args.get(4).uint32_value(scope).unwrap_or(0) as usize;
+
+    if length == 0 {
+        rv.set(vec_to_uint8_array(scope, Vec::new()).into());
+        return;
+    }
+
+    let mut out = vec![0u8; length];
+
+    let result: Result<(), String> = match hash_name.as_str() {
+        "SHA-1" => {
+            pbkdf2_hmac::<sha1::Sha1>(&key_data, &salt, iterations, &mut out);
+            Ok(())
+        }
+        "SHA-256" => {
+            pbkdf2_hmac::<sha2::Sha256>(&key_data, &salt, iterations, &mut out);
+            Ok(())
+        }
+        "SHA-384" => {
+            pbkdf2_hmac::<sha2::Sha384>(&key_data, &salt, iterations, &mut out);
+            Ok(())
+        }
+        "SHA-512" => {
+            pbkdf2_hmac::<sha2::Sha512>(&key_data, &salt, iterations, &mut out);
+            Ok(())
+        }
+        _ => Err(format!("PBKDF2: unsupported hash \"{hash_name}\"")),
+    };
+
+    match result {
+        Ok(()) => rv.set(vec_to_uint8_array(scope, out).into()),
+        Err(e) => {
+            let msg = v8::String::new(scope, &format!("{e}")).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+        }
+    }
+}
+
+// --- AES-KW wrap/unwrap -----------------------------------------------------
+
+fn op_crypto_wrap_key_aes_kw(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use aes::cipher::{BlockEncrypt, KeyInit};
+    use aes::Aes128;
+
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    let data = read_bytes(args.get(1)).unwrap_or_default();
+
+    if data.len() % 8 != 0 || data.len() < 16 {
+        let msg = v8::String::new(scope, "AES-KW: data must be multiple of 8 bytes and at least 16 bytes").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    if key_data.len() != 16 {
+        let msg = v8::String::new(scope, "AES-KW: only 128-bit keys supported").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    let cipher = Aes128::new(key_data.as_slice().into());
+    let a_iv = [0xA6u8, 0xA6, 0xA6, 0xA6, 0xA6, 0xA6, 0xA6, 0xA6];
+    let n = data.len() / 8;
+    let mut a = a_iv.to_vec();
+    a.extend_from_slice(&data);
+    let mut r = a[a.len() - 8 * n..].to_vec();
+    let mut a_block = [0u8; 16];
+
+    for j in 0..6 {
+        for i in 0..n {
+            a_block[..8].copy_from_slice(&a[..8]);
+            a_block[8..].copy_from_slice(&r[i * 8..(i + 1) * 8]);
+            let block = aes::Block::from_mut_slice(&mut a_block);
+            cipher.encrypt_block(block);
+            let t = ((n * j) + i + 1) as u64;
+            for k in 0..8 {
+                a_block[k] ^= (t >> (56 - 8 * k)) as u8;
+            }
+            a[..8].copy_from_slice(&a_block[..8]);
+            r[i * 8..(i + 1) * 8].copy_from_slice(&a_block[8..]);
+        }
+    }
+
+    let mut output = Vec::with_capacity(8 * (n + 1));
+    output.extend_from_slice(&a[..8]);
+    output.extend_from_slice(&r);
+
+    rv.set(vec_to_uint8_array(scope, output).into());
+}
+
+fn op_crypto_unwrap_key_aes_kw(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use aes::cipher::{BlockDecrypt, KeyInit};
+    use aes::Aes128;
+
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    let data = read_bytes(args.get(1)).unwrap_or_default();
+
+    if data.len() % 8 != 0 || data.len() < 24 {
+        let msg = v8::String::new(scope, "AES-KW: data must be multiple of 8 bytes and at least 24 bytes").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    if key_data.len() != 16 {
+        let msg = v8::String::new(scope, "AES-KW: only 128-bit keys supported").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    let cipher = Aes128::new(key_data.as_slice().into());
+    let n = data.len() / 8 - 1;
+    let mut a = data[..8].to_vec();
+    let mut r = data[8..].to_vec();
+    let mut a_block = [0u8; 16];
+
+    for j in (0..6).rev() {
+        for i in (0..n).rev() {
+            let t = ((n * j) + i + 1) as u64;
+            for k in 0..8 {
+                a_block[k] = a[k] ^ (t >> (56 - 8 * k)) as u8;
+            }
+            a_block[8..].copy_from_slice(&r[i * 8..(i + 1) * 8]);
+            let block = aes::Block::from_mut_slice(&mut a_block);
+            cipher.decrypt_block(block);
+            a[..8].copy_from_slice(&a_block[..8]);
+            r[i * 8..(i + 1) * 8].copy_from_slice(&a_block[8..]);
+        }
+    }
+
+    if &a[..8] != &[0xA6u8, 0xA6, 0xA6, 0xA6, 0xA6, 0xA6, 0xA6, 0xA6] {
+        let msg = v8::String::new(scope, "AES-KW: integrity check failed").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    rv.set(vec_to_uint8_array(scope, r).into());
+}
+
+// --- base64url helper -------------------------------------------------------
+
+fn base64url_encode(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }

@@ -58,6 +58,27 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "g
 tokio-util = { version = "0.7", features = ["rt"] }
 cipher = "0.4"
 
+# WebCrypto RSA / EC asymmetric crypto
+rsa = { version = "0.10.0-rc.18", features = ["sha1", "sha2", "getrandom"] }
+getrandom = "0.4"
+rand_core = "0.10"
+signature = "3"
+p256 = { version = "0.14", features = ["ecdsa", "pkcs8", "ecdh"] }
+p384 = { version = "0.14", features = ["ecdsa", "pkcs8", "ecdh"] }
+p521 = { version = "0.14", features = ["ecdsa", "pkcs8", "ecdh"] }
+elliptic-curve = { version = "0.14", features = ["pkcs8", "ecdh"] }
+pkcs8 = "0.11"
+spki = "0.8"
+
+# WebCrypto KDFs (deriveBits / deriveKey)
+hkdf = "0.13"
+pbkdf2 = "0.13"
+
+# WebCrypto Ed25519 / X25519
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
+x25519-dalek = "2"
+curve25519-dalek = "4"
+
 [profile.release]
 lto = true
 codegen-units = 1
