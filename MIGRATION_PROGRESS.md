@@ -62,15 +62,19 @@ EC (ECDSA/ECDH P-256/P-384/P-521), Ed25519, X25519, HKDF, PBKDF2.
 - [x] `URLPattern` — ported from Deno's `ext/url/01_urlpattern.js`
 - **Status:** complete — WPT 24339/24343 (4 pre-existing streams/messaging failures; no URLPattern WPT suite vendored)
 
-### 4. WebSocket + BroadcastChannel
-- [ ] `WebSocket` — port `ext/websocket`. Transport is Rust op; spec surface is JS.
-      Permission-gated like `fetch`.
-- [ ] `BroadcastChannel` — port `ext/broadcast_channel`
-- **Status:** not started
+### 4. WebSocket + BroadcastChannel — COMPLETE
+- [x] `WebSocket` — full client using tokio-tungstenite, permission-gated
+- [x] `BroadcastChannel` — pure JS in-process pub/sub
+- **Status:** complete — WPT 24444/24449 (5 failures: 4 pre-existing + 1 CORS fetch)
 
-### 5. Fix the 4 remaining WPT failures
+### 5. Fix the remaining WPT failures
 - [ ] Enumerate, diagnose, fix each. If out of scope, explain in this file.
-- **Status:** not started
+- **Status:** not started — 5 failures:
+  1. "When transferring a non-enabled port multiple times" (MessagePort)
+  2. "Patched then() sees byobRequest after filling all pending pull-into descriptors" (Streams)
+  3. "readable.cancel() and a parallel writable.close() should reject…" (Streams/TransformStream)
+  4. "enqueue() must not synchronously call write algorithm" (Streams/TransformStream)
+  5. "Loading data…" — CORS fetch test trying to load local file (fetch limitation)
 
 ### 6. V8 startup snapshot
 - [ ] Snapshot bootstrapped heap at build time (rusty_v8 startup snapshots)
@@ -85,4 +89,4 @@ Performance Timeline (mark/measure/PerformanceObserver).
 - Build: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo build`
 - WPT: `distrobox-host-exec podman exec -w /workspaces/limun gallant_chaplygin cargo run -- tests/wpt/run.js`
 - Baseline WPT (pre-migration): 78/79
-- Current WPT: 24339/24343
+- Current WPT: 24444/24449
