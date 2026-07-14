@@ -121,6 +121,14 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     set_fn(scope, ops, "op_crypto_get_random_values", op_crypto_get_random_values);
     set_fn(scope, ops, "op_crypto_random_uuid", op_crypto_random_uuid);
     set_fn(scope, ops, "op_crypto_digest", op_crypto_digest);
+    set_fn(scope, ops, "op_crypto_generate_key", op_crypto_generate_key);
+    set_fn(scope, ops, "op_crypto_sign_hmac", op_crypto_sign_hmac);
+    set_fn(scope, ops, "op_crypto_encrypt_aes_cbc", op_crypto_encrypt_aes_cbc);
+    set_fn(scope, ops, "op_crypto_decrypt_aes_cbc", op_crypto_decrypt_aes_cbc);
+    set_fn(scope, ops, "op_crypto_encrypt_aes_ctr", op_crypto_encrypt_aes_ctr);
+    set_fn(scope, ops, "op_crypto_decrypt_aes_ctr", op_crypto_decrypt_aes_ctr);
+    set_fn(scope, ops, "op_crypto_encrypt_aes_gcm", op_crypto_encrypt_aes_gcm);
+    set_fn(scope, ops, "op_crypto_decrypt_aes_gcm", op_crypto_decrypt_aes_gcm);
 
     crate::web::set_global(scope, global, "__limunOps", ops.into());
 }
@@ -1930,15 +1938,16 @@ fn op_deserialize(
 // --- WebCrypto ops ---------------------------------------------------------
 //
 // WebCrypto `crypto.getRandomValues()` / `crypto.randomUUID()` /
-// `crypto.subtle.digest()` backing ops. The spec surface (the `Crypto`/
-// `SubtleCrypto`/`CryptoKey` classes, WebIDL argument validation, algorithm
-// name normalization, error-type selection, Promise wrapping for `digest`)
+// `crypto.subtle.digest()` / `generateKey` / `sign` / `verify` / `encrypt` /
+// `decrypt` / `importKey` / `exportKey` backing ops. The spec surface (the
+// `Crypto`/`SubtleCrypto`/`CryptoKey` classes, WebIDL argument validation,
+// algorithm name normalization, error-type selection, Promise wrapping)
 // lives in the JS module `ext:limun/03_crypto.js`. These ops are flat: a
 // TypedArray in (filled in place), no return; a string out (UUID); a string
-// name + Uint8Array in, Uint8Array out (digest). Errors are bare TypeErrors;
-// the JS layer catches and rethrows as DOMException with the spec-correct
-// name (`NotSupportedError` for unknown algorithms, `TypeMismatchError` /
-// `QuotaExceededError` for getRandomValues — though those checks live in JS).
+// name + Uint8Array in, Uint8Array out (digest); or Uint8Array/number args
+// in, Uint8Array out (generate_key, sign_hmac, encrypt/decrypt AES). Errors
+// are bare TypeErrors; the JS layer catches and rethrows as DOMException
+// with the spec-correct name.
 
 /// `op_crypto_get_random_values(typedArray) -> undefined` — fill the backing
 /// store of an integer TypedArray with cryptographically-secure random bytes
@@ -2107,4 +2116,493 @@ fn op_crypto_digest(
     };
 
     rv.set(vec_to_uint8_array(scope, digest_bytes).into());
+}
+
+/// `op_crypto_generate_key(algorithm: String, length: u32) -> Uint8Array` —
+/// generate `length / 8` cryptographically-secure random bytes for a new
+/// symmetric key (HMAC or AES). `algorithm` is "HMAC" or "AES" (ignored
+/// beyond dispatch — the op just needs the byte count). The JS layer has
+/// already validated `length` (128/192/256 for AES; any for HMAC). Returns
+/// a fresh Uint8Array with the key material.
+fn op_crypto_generate_key(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use rand::RngCore;
+
+    let _algorithm = args.get(0).to_rust_string_lossy(scope);
+    let length_bits = args.get(1).uint32_value(scope).unwrap_or(0);
+    let byte_len = (length_bits / 8) as usize;
+    let mut bytes = vec![0u8; byte_len];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    rv.set(vec_to_uint8_array(scope, bytes).into());
+}
+
+/// `op_crypto_sign_hmac(keyData: Uint8Array, hashName: String, data:
+/// Uint8Array) -> Uint8Array` — compute HMAC of `data` with `keyData` using
+/// the hash named by `hashName` (SHA-1, SHA-256, SHA-384, SHA-512). Returns
+/// the HMAC tag as a fresh Uint8Array. HMAC is implemented manually (RFC
+/// 2104) because the `hmac` crate (0.12) pulls `digest` 0.10 which
+/// conflicts with `sha2` 0.11's `digest` 0.11.
+fn op_crypto_sign_hmac(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use sha1::Sha1;
+    use sha2::{Sha256, Sha384, Sha512};
+    use sha2::Digest;
+
+    let key_data = read_bytes(args.get(0)).unwrap_or_default();
+    let hash_name = args.get(1).to_rust_string_lossy(scope);
+    let data = read_bytes(args.get(2)).unwrap_or_default();
+
+    let (block_size, output_size) = match hash_name.as_str() {
+        "SHA-1" => (64, 20),
+        "SHA-256" => (64, 32),
+        "SHA-384" => (128, 48),
+        "SHA-512" => (128, 64),
+        _ => {
+            let msg = v8::String::new(
+                scope,
+                &format!("HMAC: unsupported hash \"{hash_name}\""),
+            ).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let mut key = key_data.clone();
+    if key.len() > block_size {
+        let hashed = match hash_name.as_str() {
+            "SHA-1" => Sha1::digest(&key).to_vec(),
+            "SHA-256" => Sha256::digest(&key).to_vec(),
+            "SHA-384" => Sha384::digest(&key).to_vec(),
+            "SHA-512" => Sha512::digest(&key).to_vec(),
+            _ => unreachable!(),
+        };
+        key = hashed;
+    }
+    if key.len() < block_size {
+        key.resize(block_size, 0u8);
+    }
+
+    let mut o_key_pad = vec![0x5cu8; block_size];
+    let mut i_key_pad = vec![0x36u8; block_size];
+    for i in 0..block_size {
+        o_key_pad[i] ^= key[i];
+        i_key_pad[i] ^= key[i];
+    }
+
+    let inner_hash: Vec<u8> = {
+        let mut inner = i_key_pad;
+        inner.extend_from_slice(&data);
+        match hash_name.as_str() {
+            "SHA-1" => Sha1::digest(&inner).to_vec(),
+            "SHA-256" => Sha256::digest(&inner).to_vec(),
+            "SHA-384" => Sha384::digest(&inner).to_vec(),
+            "SHA-512" => Sha512::digest(&inner).to_vec(),
+            _ => unreachable!(),
+        }
+    };
+
+    let outer_input = {
+        let mut outer = o_key_pad;
+        outer.extend_from_slice(&inner_hash);
+        outer
+    };
+
+    let tag: Vec<u8> = match hash_name.as_str() {
+        "SHA-1" => Sha1::digest(&outer_input).to_vec(),
+        "SHA-256" => Sha256::digest(&outer_input).to_vec(),
+        "SHA-384" => Sha384::digest(&outer_input).to_vec(),
+        "SHA-512" => Sha512::digest(&outer_input).to_vec(),
+        _ => unreachable!(),
+    };
+
+    let _ = output_size;
+    rv.set(vec_to_uint8_array(scope, tag).into());
+}
+
+/// `op_crypto_encrypt_aes_cbc(keyData: Uint8Array, iv: Uint8Array, data:
+/// Uint8Array) -> Uint8Array` — AES-CBC encryption with PKCS7 padding.
+/// Returns the ciphertext as a fresh Uint8Array.
+fn op_crypto_encrypt_aes_cbc(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+    type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+    type Aes192CbcEnc = cbc::Encryptor<aes::Aes192>;
+    type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+
+    let key = read_bytes(args.get(0)).unwrap_or_default();
+    let iv = read_bytes(args.get(1)).unwrap_or_default();
+    let data = read_bytes(args.get(2)).unwrap_or_default();
+
+    if iv.len() != 16 {
+        let msg = v8::String::new(scope, "AES-CBC: IV must be 16 bytes").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    let cipher_text: Vec<u8> = match key.len() {
+        16 => Aes128CbcEnc::new(key.as_slice().into(), iv.as_slice().into())
+            .encrypt_padded_vec_mut::<Pkcs7>(&data),
+        24 => Aes192CbcEnc::new(key.as_slice().into(), iv.as_slice().into())
+            .encrypt_padded_vec_mut::<Pkcs7>(&data),
+        32 => Aes256CbcEnc::new(key.as_slice().into(), iv.as_slice().into())
+            .encrypt_padded_vec_mut::<Pkcs7>(&data),
+        _ => {
+            let msg = v8::String::new(
+                scope,
+                &format!("AES-CBC: invalid key length {}", key.len() * 8),
+            ).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    rv.set(vec_to_uint8_array(scope, cipher_text).into());
+}
+
+/// `op_crypto_decrypt_aes_cbc(keyData: Uint8Array, iv: Uint8Array, data:
+/// Uint8Array) -> Uint8Array` — AES-CBC decryption with PKCS7 unpadding.
+/// Throws on padding error (the JS layer converts to OperationError).
+fn op_crypto_decrypt_aes_cbc(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+    type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
+    type Aes192CbcDec = cbc::Decryptor<aes::Aes192>;
+    type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+
+    let key = read_bytes(args.get(0)).unwrap_or_default();
+    let iv = read_bytes(args.get(1)).unwrap_or_default();
+    let data = read_bytes(args.get(2)).unwrap_or_default();
+
+    if iv.len() != 16 {
+        let msg = v8::String::new(scope, "AES-CBC: IV must be 16 bytes").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    let plain_text: Option<Vec<u8>> = match key.len() {
+        16 => Aes128CbcDec::new(key.as_slice().into(), iv.as_slice().into())
+            .decrypt_padded_vec_mut::<Pkcs7>(&data)
+            .ok(),
+        24 => Aes192CbcDec::new(key.as_slice().into(), iv.as_slice().into())
+            .decrypt_padded_vec_mut::<Pkcs7>(&data)
+            .ok(),
+        32 => Aes256CbcDec::new(key.as_slice().into(), iv.as_slice().into())
+            .decrypt_padded_vec_mut::<Pkcs7>(&data)
+            .ok(),
+        _ => None,
+    };
+
+    match plain_text {
+        Some(pt) => rv.set(vec_to_uint8_array(scope, pt).into()),
+        None => {
+            let msg = v8::String::new(scope, "AES-CBC: decryption failed").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+        }
+    }
+}
+
+/// `op_crypto_encrypt_aes_ctr(keyData: Uint8Array, counter: Uint8Array,
+/// ctrLength: u32, data: Uint8Array) -> Uint8Array` — AES-CTR encryption
+/// (no padding; CTR is symmetric so encrypt == decrypt). `ctrLength` is
+/// the counter length in bits (1-128) but is unused here — the full 128-bit
+/// counter block is used as-is.
+fn op_crypto_encrypt_aes_ctr(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use aes::cipher::{KeyIvInit, StreamCipher};
+    type Aes128CtrEnc = ctr::Ctr128BE<aes::Aes128>;
+    type Aes192CtrEnc = ctr::Ctr128BE<aes::Aes192>;
+    type Aes256CtrEnc = ctr::Ctr128BE<aes::Aes256>;
+
+    let key = read_bytes(args.get(0)).unwrap_or_default();
+    let counter = read_bytes(args.get(1)).unwrap_or_default();
+    let _ctr_length = args.get(2).uint32_value(scope).unwrap_or(0);
+    let data = read_bytes(args.get(3)).unwrap_or_default();
+
+    if counter.len() != 16 {
+        let msg = v8::String::new(scope, "AES-CTR: counter must be 16 bytes").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    let mut buf = data.clone();
+    match key.len() {
+        16 => {
+            let mut cipher = Aes128CtrEnc::new(key.as_slice().into(), counter.as_slice().into());
+            cipher.apply_keystream(&mut buf);
+        }
+        24 => {
+            let mut cipher = Aes192CtrEnc::new(key.as_slice().into(), counter.as_slice().into());
+            cipher.apply_keystream(&mut buf);
+        }
+        32 => {
+            let mut cipher = Aes256CtrEnc::new(key.as_slice().into(), counter.as_slice().into());
+            cipher.apply_keystream(&mut buf);
+        }
+        _ => {
+            let msg = v8::String::new(
+                scope,
+                &format!("AES-CTR: invalid key length {}", key.len() * 8),
+            ).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    }
+
+    rv.set(vec_to_uint8_array(scope, buf).into());
+}
+
+/// `op_crypto_decrypt_aes_ctr(keyData: Uint8Array, counter: Uint8Array,
+/// ctrLength: u32, data: Uint8Array) -> Uint8Array` — AES-CTR decryption
+/// (identical to encryption — CTR is a stream cipher).
+fn op_crypto_decrypt_aes_ctr(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    op_crypto_encrypt_aes_ctr(scope, args, rv);
+}
+
+fn gcm_compute_tag(
+    ghash_key: &[u8; 16],
+    iv: &[u8],
+    aad: &[u8],
+    data: &[u8],
+) -> ([u8; 16], [u8; 16]) {
+    use cipher::generic_array::GenericArray;
+    use ghash::universal_hash::{KeyInit, UniversalHash};
+
+    let mut ghash = ghash::GHash::new(GenericArray::from_slice(ghash_key));
+
+    let j0: [u8; 16] = if iv.len() == 12 {
+        let mut block = [0u8; 16];
+        block[..12].copy_from_slice(iv);
+        block[15] = 1;
+        block
+    } else {
+        ghash.update_padded(iv);
+        let mut len_block = [0u8; 16];
+        let iv_bits = (iv.len() as u64) * 8;
+        len_block[8..].copy_from_slice(&iv_bits.to_be_bytes());
+        ghash.update(&[GenericArray::from_slice(&len_block).clone()]);
+        let j0_ga = ghash.finalize();
+        let mut block = [0u8; 16];
+        block.copy_from_slice(&j0_ga);
+        block
+    };
+
+    let mut ghash2 = ghash::GHash::new(GenericArray::from_slice(ghash_key));
+    ghash2.update_padded(aad);
+    ghash2.update_padded(data);
+    let aad_bits = (aad.len() as u64) * 8;
+    let data_bits = (data.len() as u64) * 8;
+    let mut len_block = [0u8; 16];
+    len_block[..8].copy_from_slice(&aad_bits.to_be_bytes());
+    len_block[8..].copy_from_slice(&data_bits.to_be_bytes());
+    ghash2.update(&[GenericArray::from_slice(&len_block).clone()]);
+    let tag = ghash2.finalize();
+    let mut tag_arr = [0u8; 16];
+    tag_arr.copy_from_slice(&tag);
+
+    (j0, tag_arr)
+}
+
+/// `op_crypto_encrypt_aes_gcm(keyData: Uint8Array, iv: Uint8Array,
+/// additionalData: Uint8Array|null, tagLength: u32, data: Uint8Array) ->
+/// Uint8Array` — AES-GCM encryption. Returns ciphertext + tag concatenated
+/// (tag at the end, `tagLength/8` bytes). `tagLength` is in bits (32-128).
+fn op_crypto_encrypt_aes_gcm(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use aes::cipher::{BlockEncrypt, KeyInit, KeyIvInit, StreamCipher};
+    use cipher::generic_array::GenericArray;
+
+    let key = read_bytes(args.get(0)).unwrap_or_default();
+    let iv = read_bytes(args.get(1)).unwrap_or_default();
+    let aad_val = args.get(2);
+    let tag_length = args.get(3).uint32_value(scope).unwrap_or(128);
+    let data = read_bytes(args.get(4)).unwrap_or_default();
+
+    let tag_bytes = (tag_length / 8) as usize;
+    if tag_bytes < 4 || tag_bytes > 16 {
+        let msg = v8::String::new(scope, "AES-GCM: invalid tag length").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    let aad: Vec<u8> = if aad_val.is_null_or_undefined() {
+        Vec::new()
+    } else {
+        read_bytes(aad_val).unwrap_or_default()
+    };
+
+    macro_rules! do_gcm_encrypt {
+        ($cipher_ty:ty) => {{
+            let cipher = <$cipher_ty>::new(GenericArray::from_slice(&key));
+
+            let mut ghash_key = [0u8; 16];
+            cipher.encrypt_block(GenericArray::from_mut_slice(&mut ghash_key));
+
+            let (j0, _) = gcm_compute_tag(&ghash_key, &iv, &aad, &[]);
+
+            let mut ctr_state = j0;
+            ctr_state[15] = ctr_state[15].wrapping_add(1);
+            let mut ctr_enc = ctr::Ctr32BE::<$cipher_ty>::new(
+                GenericArray::from_slice(&key),
+                GenericArray::from_slice(&ctr_state),
+            );
+
+            let mut buffer = data.clone();
+            if !buffer.is_empty() {
+                ctr_enc.apply_keystream(&mut buffer);
+            }
+
+            let (_, mut tag) = gcm_compute_tag(&ghash_key, &iv, &aad, &buffer);
+
+            let mut mask = j0;
+            cipher.encrypt_block(GenericArray::from_mut_slice(&mut mask));
+            for (a, b) in tag.iter_mut().zip(mask.iter()) {
+                *a ^= *b;
+            }
+
+            let mut output = Vec::with_capacity(buffer.len() + tag_bytes);
+            output.extend_from_slice(&buffer);
+            output.extend_from_slice(&tag[..tag_bytes]);
+            output
+        }};
+    }
+
+    let output = match key.len() {
+        16 => do_gcm_encrypt!(aes::Aes128),
+        24 => do_gcm_encrypt!(aes::Aes192),
+        32 => do_gcm_encrypt!(aes::Aes256),
+        _ => {
+            let msg = v8::String::new(
+                scope,
+                &format!("AES-GCM: invalid key length {}", key.len() * 8),
+            ).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    rv.set(vec_to_uint8_array(scope, output).into());
+}
+
+/// `op_crypto_decrypt_aes_gcm(keyData: Uint8Array, iv: Uint8Array,
+/// additionalData: Uint8Array|null, tagLength: u32, ciphertext: Uint8Array)
+/// -> Uint8Array` — AES-GCM decryption. Expects ciphertext with truncated
+/// tag appended. On authentication failure, throws a TypeError.
+fn op_crypto_decrypt_aes_gcm(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use aes::cipher::{BlockEncrypt, KeyInit, KeyIvInit, StreamCipher};
+    use cipher::generic_array::GenericArray;
+
+    let key = read_bytes(args.get(0)).unwrap_or_default();
+    let iv = read_bytes(args.get(1)).unwrap_or_default();
+    let aad_val = args.get(2);
+    let tag_length = args.get(3).uint32_value(scope).unwrap_or(128);
+    let data = read_bytes(args.get(4)).unwrap_or_default();
+
+    let tag_bytes = (tag_length / 8) as usize;
+    if tag_bytes < 4 || tag_bytes > 16 {
+        let msg = v8::String::new(scope, "AES-GCM: invalid tag length").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    if data.len() < tag_bytes {
+        let msg = v8::String::new(scope, "AES-GCM: ciphertext too short").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    let aad: Vec<u8> = if aad_val.is_null_or_undefined() {
+        Vec::new()
+    } else {
+        read_bytes(aad_val).unwrap_or_default()
+    };
+
+    let ct_len = data.len() - tag_bytes;
+    let ciphertext = &data[..ct_len];
+    let provided_tag = &data[ct_len..];
+
+    macro_rules! do_gcm_decrypt {
+        ($cipher_ty:ty) => {{
+            let cipher = <$cipher_ty>::new(GenericArray::from_slice(&key));
+
+            let mut ghash_key = [0u8; 16];
+            cipher.encrypt_block(GenericArray::from_mut_slice(&mut ghash_key));
+
+            let (j0, mut tag) = gcm_compute_tag(&ghash_key, &iv, &aad, ciphertext);
+
+            let mut mask = j0;
+            cipher.encrypt_block(GenericArray::from_mut_slice(&mut mask));
+            for (a, b) in tag.iter_mut().zip(mask.iter()) {
+                *a ^= *b;
+            }
+
+            let tag_match = tag[..tag_bytes]
+                .iter()
+                .zip(provided_tag.iter())
+                .all(|(a, b)| a == b);
+
+            if !tag_match {
+                None
+            } else {
+                let mut ctr_state = j0;
+                ctr_state[15] = ctr_state[15].wrapping_add(1);
+                let mut ctr_dec = ctr::Ctr32BE::<$cipher_ty>::new(
+                    GenericArray::from_slice(&key),
+                    GenericArray::from_slice(&ctr_state),
+                );
+                let mut plain_text = ciphertext.to_vec();
+                if !plain_text.is_empty() {
+                    ctr_dec.apply_keystream(&mut plain_text);
+                }
+                Some(plain_text)
+            }
+        }};
+    }
+
+    let result = match key.len() {
+        16 => do_gcm_decrypt!(aes::Aes128),
+        24 => do_gcm_decrypt!(aes::Aes192),
+        32 => do_gcm_decrypt!(aes::Aes256),
+        _ => {
+            let msg = v8::String::new(
+                scope,
+                &format!("AES-GCM: invalid key length {}", key.len() * 8),
+            ).unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    match result {
+        Some(pt) => rv.set(vec_to_uint8_array(scope, pt).into()),
+        None => {
+            let msg = v8::String::new(scope, "AES-GCM: decryption failed").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+        }
+    }
 }

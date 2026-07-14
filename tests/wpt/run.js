@@ -97,6 +97,11 @@ let currentScriptUrl = here.href;
 await loadScript("./suite/resources/testharness.js");
 await loadScript("./testharnessreport.js");
 
+// Some WPT support files (e.g. `common/subset-tests.js`) reference
+// `location` to decide whether to run a subset of tests. Limun has no
+// browsing context, so provide a minimal URL shim.
+globalThis.location = new URL("https://example.com/");
+
 // Shim `fetch_json` to load WPT fixture JSON via the module loader (import
 // attribute `type:"json"`) instead of `fetch`. WPT's `fetch_json(resource)`
 // resolves `resource` against the *test page's* URL — but limun has no
@@ -317,6 +322,21 @@ const defaultFiles = [
   "WebCryptoAPI/getRandomValues.any.js",
   "WebCryptoAPI/randomUUID.https.any.js",
   "WebCryptoAPI/digest/digest.https.any.js",
+  "WebCryptoAPI/import_export/symmetric_importKey.https.any.js",
+  "WebCryptoAPI/sign_verify/hmac.https.any.js",
+  "WebCryptoAPI/encrypt_decrypt/aes_cbc.https.any.js",
+  "WebCryptoAPI/encrypt_decrypt/aes_ctr.https.any.js",
+  "WebCryptoAPI/encrypt_decrypt/aes_gcm.https.any.js",
+  "WebCryptoAPI/generateKey/successes_AES-CBC.https.any.js",
+  "WebCryptoAPI/generateKey/successes_AES-CTR.https.any.js",
+  "WebCryptoAPI/generateKey/successes_AES-GCM.https.any.js",
+  "WebCryptoAPI/generateKey/successes_AES-KW.https.any.js",
+  "WebCryptoAPI/generateKey/successes_HMAC.https.any.js",
+  "WebCryptoAPI/generateKey/failures_AES-CBC.https.any.js",
+  "WebCryptoAPI/generateKey/failures_AES-CTR.https.any.js",
+  "WebCryptoAPI/generateKey/failures_AES-GCM.https.any.js",
+  "WebCryptoAPI/generateKey/failures_AES-KW.https.any.js",
+  "WebCryptoAPI/generateKey/failures_HMAC.https.any.js",
   // Keep `headers-no-cors.any.js` last: it uses `fetch()` for a WPT
   // fixture, and `currentScriptUrl` points at the last loaded file when
   // the async harness starts running.

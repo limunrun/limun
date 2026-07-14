@@ -131,13 +131,22 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     // `crypto` global are installed by the JS module
     // `ext:limun/03_crypto.js` during bootstrap. Increment 1 covers
     // `getRandomValues`, `randomUUID`, and `subtle.digest` (SHA-1/256/384/
-    // 512 + SHA3-256/384/512). The JS layer owns the spec surface (class
-    // shapes, WebIDL brand checks, algorithm name normalization, error-type
-    // selection, Promise wrapping for `digest`); the flat Rust ops
-    // (`op_crypto_get_random_values`, `op_crypto_random_uuid`,
-    // `op_crypto_digest`) in `core::ops` are the irreducible native work:
-    // OS-entropy random byte generation, UUID v4 bit-fixing + hex
-    // formatting, and hash computation via the `sha1`/`sha2`/`sha3` crates.
+    // 512 + SHA3-256/384/512). Increment 2a adds the algorithm normalization
+    // framework, `CryptoKey` construction, and HMAC + AES symmetric
+    // operations: `generateKey`, `importKey`, `exportKey`, `sign`, `verify`,
+    // `encrypt`, `decrypt` for AES-CBC/CTR/GCM and HMAC. The JS layer owns
+    // the spec surface (class shapes, WebIDL brand checks, algorithm name
+    // normalization, error-type selection, Promise wrapping); the flat Rust
+    // ops (`op_crypto_get_random_values`, `op_crypto_random_uuid`,
+    // `op_crypto_digest`, `op_crypto_generate_key`, `op_crypto_sign_hmac`,
+    // `op_crypto_encrypt_aes_cbc`, `op_crypto_decrypt_aes_cbc`,
+    // `op_crypto_encrypt_aes_ctr`, `op_crypto_decrypt_aes_ctr`,
+    // `op_crypto_encrypt_aes_gcm`, `op_crypto_decrypt_aes_gcm`) in
+    // `core::ops` are the irreducible native work: OS-entropy random byte
+    // generation, UUID v4 bit-fixing + hex formatting, hash computation via
+    // the `sha1`/`sha2`/`sha3` crates, HMAC via the `hmac` crate, and AES
+    // symmetric encryption/decryption via the `aes`/`cbc`/`ctr`/`aes-gcm`
+    // crates.
 }
 
 /// Install a platform global the way real engines do — own, writable,
