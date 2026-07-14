@@ -204,6 +204,44 @@ const defaultFiles = [
   "FileAPI/blob/Blob-slice-overflow.any.js",
   "FileAPI/blob/Blob-constructor.any.js",
   "FileAPI/file/File-constructor.any.js",
+  // --- FileAPI (FileReader) ------------------------------------------------
+  "FileAPI/reading-data-section/Determining-Encoding.any.js",
+  "FileAPI/reading-data-section/FileReader-event-handler-attributes.any.js",
+  "FileAPI/reading-data-section/FileReader-multiple-reads.any.js",
+  "FileAPI/reading-data-section/filereader_abort.any.js",
+  "FileAPI/reading-data-section/filereader_error.any.js",
+  "FileAPI/reading-data-section/filereader_events.any.js",
+  "FileAPI/reading-data-section/filereader_readAsArrayBuffer.any.js",
+  "FileAPI/reading-data-section/filereader_readAsBinaryString.any.js",
+  "FileAPI/reading-data-section/filereader_readAsDataURL.any.js",
+  "FileAPI/reading-data-section/filereader_readAsText.any.js",
+  "FileAPI/reading-data-section/filereader_readAsText_blob_type_charset.any.js",
+  "FileAPI/reading-data-section/filereader_readystate.any.js",
+  // "FileAPI/reading-data-section/filereader_result.any.js" — its `setup()`
+  //   callback is declared after the `async_test`s that depend on it. The
+  //   WPT harness runs `async_test` callbacks synchronously, so `blob` is
+  //   still undefined; browsers apparently tolerate this because of per-page
+  //   isolation. Skip here to avoid false negatives.
+  // --- Compression Standard ------------------------------------------------
+  // Only self-contained tests are included. Tests that iterate over `formats`
+  //   (including "brotli") or fetch large media fixtures are skipped because
+  //   Limun's CompressionStream/DecompressionStream only supports deflate,
+  //   deflate-raw, and gzip (no brotli) and runs without a WPT server.
+  "compression/compression-constructor-error.any.js",
+  "compression/decompression-constructor-error.any.js",
+  // --- TextEncoderStream / TextDecoderStream -------------------------------
+  // `decode-utf8.any.js` is skipped because it loads `/common/sab.js` and
+  //   tests SharedArrayBuffer, which is not supported in this runtime.
+  "encoding/streams/decode-attributes.any.js",
+  "encoding/streams/decode-bad-chunks.any.js",
+  "encoding/streams/decode-ignore-bom.any.js",
+  "encoding/streams/decode-incomplete-input.any.js",
+  "encoding/streams/decode-non-utf8.any.js",
+  "encoding/streams/decode-split-character.any.js",
+  "encoding/streams/encode-bad-chunks.any.js",
+  "encoding/streams/encode-utf8.any.js",
+  "encoding/streams/backpressure.any.js",
+  "encoding/streams/readable-writable-properties.any.js",
   // --- Streams Standard (full port) -------------------------------------
   // readable-streams (default controller path)
   "streams/readable-streams/constructor.any.js",

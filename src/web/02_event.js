@@ -1025,6 +1025,143 @@
     ArrayPrototypePush(sourceSignal[dependentSignals], resultSignal);
   }
 
+  // --- ErrorEvent / ProgressEvent / reportError ---------------------------
+
+  // `ErrorEvent` — HTML Standard "errorevent" interface. Exposed as a
+  // global; used by `reportError` below and by any internal code that
+  // dispatches "error" events.
+  class ErrorEvent extends Event {
+    #message = "";
+    #filename = "";
+    #lineno = 0;
+    #colno = 0;
+    #error = undefined;
+
+    get message() {
+      return this.#message;
+    }
+    get filename() {
+      return this.#filename;
+    }
+    get lineno() {
+      return this.#lineno;
+    }
+    get colno() {
+      return this.#colno;
+    }
+    get error() {
+      return this.#error;
+    }
+
+    constructor(
+      type,
+      {
+        bubbles,
+        cancelable,
+        composed,
+        message = "",
+        filename = "",
+        lineno = 0,
+        colno = 0,
+        error,
+      } = { __proto__: null },
+    ) {
+      super(type, {
+        bubbles: bubbles,
+        cancelable: cancelable,
+        composed: composed,
+      });
+
+      this.#message = message;
+      this.#filename = filename;
+      this.#lineno = lineno;
+      this.#colno = colno;
+      this.#error = error;
+    }
+  }
+
+  ObjectDefineProperty(ErrorEvent.prototype, SymbolToStringTag, {
+    __proto__: null,
+    value: "ErrorEvent",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  const ErrorEventPrototype = ErrorEvent.prototype;
+
+  // `ProgressEvent` — WHATWG Progress Events. Used by `FileReader` and
+  // any other progress-emitting APIs.
+  class ProgressEvent extends Event {
+    constructor(type, eventInitDict = { __proto__: null }) {
+      super(type, eventInitDict);
+
+      this.lengthComputable = eventInitDict?.lengthComputable ?? false;
+      this.loaded = eventInitDict?.loaded ?? 0;
+      this.total = eventInitDict?.total ?? 0;
+    }
+  }
+
+  ObjectDefineProperty(ProgressEvent.prototype, SymbolToStringTag, {
+    __proto__: null,
+    value: "ProgressEvent",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  const ProgressEventPrototype = ProgressEvent.prototype;
+
+  // https://html.spec.whatwg.org/#report-the-exception
+  function reportException(error) {
+    const message = typeof error?.message === "string" ? error.message : String(error);
+    let filename = "";
+    let lineno = 0;
+    let colno = 0;
+    if (typeof error?.stack === "string" && error.stack.length > 0) {
+      // Best-effort parsing of a V8-style stack line. The first line after
+      // the error description is usually the throw site.
+      const lines = error.stack.split("\n");
+      for (let i = 1; i < lines.length; ++i) {
+        const line = lines[i].trim();
+        const match = RegExpPrototypeExec(
+          new SafeRegExp(/at (?:.*\s\()?(.*):(\d+):(\d+)\)?$/),
+          line,
+        );
+        if (match !== null) {
+          filename = match[1];
+          lineno = Number(match[2]);
+          colno = Number(match[3]);
+          break;
+        }
+      }
+    }
+
+    const event = new ErrorEvent("error", {
+      cancelable: true,
+      message,
+      filename,
+      lineno,
+      colno,
+      error,
+    });
+
+    // Dispatch on globalThis; if the event is not cancelled, report the
+    // error to stderr (Limun has no global onerror handler chain yet).
+    if (globalThis.dispatchEvent(event)) {
+      try {
+        globalThis.__limunOps.op_print(`${message}\n`, true);
+      } catch {
+        // swallow
+      }
+    }
+  }
+
+  // https://html.spec.whatwg.org/#dom-reporterror
+  function reportError(error) {
+    const prefix = "Failed to execute 'reportError'";
+    webidl.requiredArguments(arguments.length, 1, prefix);
+    reportException(error);
+  }
+
   // --- Install as non-enumerable globals ----------------------------------
 
   // All five are constructible interface objects — non-enumerable on
@@ -1043,9 +1180,21 @@
 
   installGlobal("Event", Event);
   installGlobal("CustomEvent", CustomEvent);
+  installGlobal("ErrorEvent", ErrorEvent);
   installGlobal("EventTarget", EventTarget);
+  installGlobal("ProgressEvent", ProgressEvent);
   installGlobal("AbortSignal", AbortSignal);
   installGlobal("AbortController", AbortController);
+
+  // `reportError` is an own global function, not a constructor, but still
+  // non-enumerable like the web API globals.
+  ObjectDefineProperty(globalThis, "reportError", {
+    __proto__: null,
+    value: reportError,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
 
   // `webidl.converters.AbortSignal` — interface converter used by the
   // Streams Standard (`StreamPipeOptions.signal`, `pipeTo`). Registered

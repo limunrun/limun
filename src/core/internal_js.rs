@@ -91,6 +91,14 @@ pub static REGISTRY: &[InternalModule] = &[
         source: include_str!("../web/05_base64.js"),
     },
     InternalModule {
+        specifier: "ext:limun/00_infra.js",
+        source: include_str!("../web/00_infra.js"),
+    },
+    InternalModule {
+        specifier: "ext:limun/01_mimesniff.js",
+        source: include_str!("../web/01_mimesniff.js"),
+    },
+    InternalModule {
         specifier: "ext:limun/08_text_encoding.js",
         source: include_str!("../web/08_text_encoding.js"),
     },
@@ -99,8 +107,16 @@ pub static REGISTRY: &[InternalModule] = &[
         source: include_str!("../web/06_streams.js"),
     },
     InternalModule {
+        specifier: "ext:limun/14_compression.js",
+        source: include_str!("../web/14_compression.js"),
+    },
+    InternalModule {
         specifier: "ext:limun/09_blob.js",
         source: include_str!("../web/09_blob.js"),
+    },
+    InternalModule {
+        specifier: "ext:limun/10_filereader.js",
+        source: include_str!("../web/10_filereader.js"),
     },
     InternalModule {
         specifier: "ext:limun/10_form_data.js",

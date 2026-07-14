@@ -45,6 +45,8 @@ ghash = "0.5"
 # Firefox/Servo use). TextDecoder routes all labels through this.
 encoding_rs = "0.8"
 
+flate2 = "1"
+
 # Async runtime — multi-thread so HTTP tasks run concurrently while the V8
 # isolate stays single-threaded on the main thread. The V8 thread never
 # enters the runtime; it only holds a Handle and spawns onto it.

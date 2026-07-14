@@ -1320,6 +1320,7 @@ dependencies = [
  "ed25519-dalek",
  "elliptic-curve",
  "encoding_rs",
+ "flate2",
  "getrandom 0.4.3",
  "ghash",
  "hkdf",

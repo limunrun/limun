@@ -57,6 +57,9 @@
     MathTrunc,
     ObjectDefineProperty,
     ObjectPrototypeIsPrototypeOf,
+    StringPrototypeCharCodeAt,
+    StringPrototypeSlice,
+    SymbolToStringTag,
     TypedArrayPrototypeGetSymbolToStringTag,
     Uint8Array,
   } = primordials;
@@ -331,10 +334,145 @@
 
   const TextEncoderPrototype = TextEncoder.prototype;
 
-  // Install as non-enumerable globals — matches the previous Rust
-  // `set_global` (DONT_ENUM) and every other constructible web class:
-  // `Object.keys(globalThis)` excludes them (verified against Node/Deno/
-  // browsers).
+  // --- TextEncoderStream ---------------------------------------------------
+
+  const _pendingHighSurrogate = Symbol("pendingHighSurrogate");
+  const _transform = Symbol("transform");
+
+  class TextEncoderStream {
+    [_pendingHighSurrogate] = null;
+    [_transform];
+
+    constructor() {
+      this[_transform] = new TransformStream({
+        transform: (chunk, controller) => {
+          chunk = webidl.converters.DOMString(chunk);
+          if (chunk === "") {
+            return;
+          }
+          if (this[_pendingHighSurrogate] !== null) {
+            chunk = this[_pendingHighSurrogate] + chunk;
+          }
+          const lastCodeUnit = StringPrototypeCharCodeAt(
+            chunk,
+            chunk.length - 1,
+          );
+          if (0xD800 <= lastCodeUnit && lastCodeUnit <= 0xDBFF) {
+            this[_pendingHighSurrogate] = StringPrototypeSlice(chunk, -1);
+            chunk = StringPrototypeSlice(chunk, 0, -1);
+          } else {
+            this[_pendingHighSurrogate] = null;
+          }
+          if (chunk) {
+            const encoder = new TextEncoder();
+            controller.enqueue(encoder.encode(chunk));
+          }
+        },
+        flush: (controller) => {
+          if (this[_pendingHighSurrogate] !== null) {
+            controller.enqueue(new Uint8Array([0xEF, 0xBF, 0xBD]));
+          }
+        },
+      });
+      this[webidl.brand] = webidl.brand;
+    }
+
+    get encoding() {
+      webidl.assertBranded(this, TextEncoderStreamPrototype, "TextEncoderStream");
+      return "utf-8";
+    }
+
+    get readable() {
+      webidl.assertBranded(this, TextEncoderStreamPrototype, "TextEncoderStream");
+      return this[_transform].readable;
+    }
+
+    get writable() {
+      webidl.assertBranded(this, TextEncoderStreamPrototype, "TextEncoderStream");
+      return this[_transform].writable;
+    }
+  }
+
+  ObjectDefineProperty(TextEncoderStream.prototype, SymbolToStringTag, {
+    __proto__: null,
+    value: "TextEncoderStream",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  const TextEncoderStreamPrototype = TextEncoderStream.prototype;
+
+  // --- TextDecoderStream ---------------------------------------------------
+
+  const _decoder = Symbol("decoder");
+
+  class TextDecoderStream {
+    [_decoder];
+    [_transform];
+
+    constructor(label = "utf-8", options = undefined) {
+      const prefix = "Failed to construct 'TextDecoderStream'";
+      label = webidl.converters.DOMString(label, prefix, "Argument 1");
+      const opts = convertTextDecoderOptions(options);
+
+      this[_decoder] = new TextDecoder(label, opts);
+      this[_transform] = new TransformStream({
+        transform: (chunk, controller) => {
+          chunk = webidl.converters.BufferSource(chunk, prefix, "chunk");
+          const decoded = this[_decoder].decode(chunk, { stream: true });
+          if (decoded) {
+            controller.enqueue(decoded);
+          }
+        },
+        flush: (controller) => {
+          const final = this[_decoder].decode();
+          if (final) {
+            controller.enqueue(final);
+          }
+        },
+        cancel: (_reason) => {
+          this[_decoder].decode();
+        },
+      });
+      this[webidl.brand] = webidl.brand;
+    }
+
+    get encoding() {
+      webidl.assertBranded(this, TextDecoderStreamPrototype, "TextDecoderStream");
+      return this[_decoder].encoding;
+    }
+
+    get fatal() {
+      webidl.assertBranded(this, TextDecoderStreamPrototype, "TextDecoderStream");
+      return this[_decoder].fatal;
+    }
+
+    get ignoreBOM() {
+      webidl.assertBranded(this, TextDecoderStreamPrototype, "TextDecoderStream");
+      return this[_decoder].ignoreBOM;
+    }
+
+    get readable() {
+      webidl.assertBranded(this, TextDecoderStreamPrototype, "TextDecoderStream");
+      return this[_transform].readable;
+    }
+
+    get writable() {
+      webidl.assertBranded(this, TextDecoderStreamPrototype, "TextDecoderStream");
+      return this[_transform].writable;
+    }
+  }
+
+  ObjectDefineProperty(TextDecoderStream.prototype, SymbolToStringTag, {
+    __proto__: null,
+    value: "TextDecoderStream",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  const TextDecoderStreamPrototype = TextDecoderStream.prototype;
+
+  // Install as non-enumerable globals
   ObjectDefineProperty(globalThis, "TextDecoder", {
     __proto__: null,
     value: TextDecoder,
@@ -345,6 +483,20 @@
   ObjectDefineProperty(globalThis, "TextEncoder", {
     __proto__: null,
     value: TextEncoder,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+  ObjectDefineProperty(globalThis, "TextDecoderStream", {
+    __proto__: null,
+    value: TextDecoderStream,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+  ObjectDefineProperty(globalThis, "TextEncoderStream", {
+    __proto__: null,
+    value: TextEncoderStream,
     writable: true,
     configurable: true,
     enumerable: false,

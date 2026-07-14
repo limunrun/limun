@@ -46,6 +46,9 @@ pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
     set_fn(scope, ops, "op_is_proxy", op_is_proxy);
     set_fn(scope, ops, "op_base64_atob", op_base64_atob);
     set_fn(scope, ops, "op_base64_btoa", op_base64_btoa);
+    set_fn(scope, ops, "op_compression_new", op_compression_new);
+    set_fn(scope, ops, "op_compression_write", op_compression_write);
+    set_fn(scope, ops, "op_compression_finish", op_compression_finish);
     set_fn(scope, ops, "op_encoding_normalize_label", op_encoding_normalize_label);
     set_fn(scope, ops, "op_encoding_decode_single", op_encoding_decode_single);
     set_fn(scope, ops, "op_encoding_new_decoder", op_encoding_new_decoder);
@@ -327,6 +330,192 @@ const FORGIVING: base64::engine::general_purpose::GeneralPurpose =
             .with_decode_padding_mode(base64::engine::DecodePaddingMode::RequireNone)
             .with_decode_allow_trailing_bits(true),
     );
+
+// --- Compression ops -------------------------------------------------------
+//
+// WHATWG CompressionStream / DecompressionStream backing ops. The spec
+// surface (the `CompressionStream`/`DecompressionStream` classes, the
+// `TransformStream` wiring, WebIDL enum/dictionary validation) lives in
+// `ext:limun/14_compression.js`. These ops are the irreducible native
+// work: `flate2`-based deflate/gzip/deflate-raw compression and
+// decompression. The JS side holds a numeric handle (id into a thread-
+// local registry); `op_compression_write` feeds bytes through the
+// encoder/decoder and returns the flushed output as a `Uint8Array`;
+// `op_compression_finish` finalizes the stream and returns trailing
+// bytes.
+
+use flate2::write::{
+    DeflateDecoder as ZlibDecoder, DeflateEncoder, GzDecoder, GzEncoder,
+    ZlibDecoder as DeflateDecoder, ZlibEncoder as ZlibEncoder,
+};
+use flate2::Compression;
+
+enum CompressionInner {
+    DeflateEncoder(ZlibEncoder<Vec<u8>>),
+    DeflateDecoder(ZlibDecoder<Vec<u8>>),
+    DeflateRawEncoder(DeflateEncoder<Vec<u8>>),
+    DeflateRawDecoder(DeflateDecoder<Vec<u8>>),
+    GzipEncoder(GzEncoder<Vec<u8>>),
+    GzipDecoder(GzDecoder<Vec<u8>>),
+}
+
+thread_local! {
+    static COMPRESSION_REGISTRY: RefCell<HashMap<u32, CompressionInner>> =
+        RefCell::new(HashMap::new());
+    static NEXT_COMPRESSION_ID: RefCell<u32> = const { RefCell::new(1) };
+}
+
+fn alloc_compression_id() -> u32 {
+    NEXT_COMPRESSION_ID.with(|id| {
+        let mut id = id.borrow_mut();
+        let cur = *id;
+        *id = id.wrapping_add(1);
+        cur
+    })
+}
+
+/// `op_compression_new(format: String, is_decoder: boolean) -> number` —
+/// allocate a new compression/decompression handle. `format` is one of
+/// `"deflate"`, `"deflate-raw"`, `"gzip"`. Returns the integer handle id.
+fn op_compression_new(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let format = args.get(0).to_rust_string_lossy(scope);
+    let is_decoder = args.get(1).boolean_value(scope);
+
+    let inner = match (format.as_str(), is_decoder) {
+        ("deflate", false) => {
+            CompressionInner::DeflateEncoder(ZlibEncoder::new(Vec::new(), Compression::default()))
+        }
+        ("deflate", true) => {
+            CompressionInner::DeflateDecoder(ZlibDecoder::new(Vec::new()))
+        }
+        ("deflate-raw", false) => {
+            CompressionInner::DeflateRawEncoder(DeflateEncoder::new(Vec::new(), Compression::default()))
+        }
+        ("deflate-raw", true) => {
+            CompressionInner::DeflateRawDecoder(DeflateDecoder::new(Vec::new()))
+        }
+        ("gzip", false) => {
+            CompressionInner::GzipEncoder(GzEncoder::new(Vec::new(), Compression::default()))
+        }
+        ("gzip", true) => {
+            CompressionInner::GzipDecoder(GzDecoder::new(Vec::new()))
+        }
+        _ => {
+            let msg = v8::String::new(scope, "Unsupported compression format").unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        }
+    };
+
+    let id = alloc_compression_id();
+    COMPRESSION_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(id, inner);
+    });
+    rv.set(v8::Number::new(scope, id as f64).into());
+}
+
+/// `op_compression_write(handle_id: number, data: Uint8Array) -> Uint8Array` —
+/// feed `data` through the encoder/decoder identified by `handle_id`,
+/// flush, and return the output bytes. Returns an empty `Uint8Array` if
+/// no output was produced.
+fn op_compression_write(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let handle_id = args.get(0).integer_value(scope).unwrap_or(0) as u32;
+    let input = read_bytes(args.get(1)).unwrap_or_default();
+
+    let output: Vec<u8> = COMPRESSION_REGISTRY.with(|reg| {
+        let mut reg = reg.borrow_mut();
+        let Some(inner) = reg.get_mut(&handle_id) else {
+            return Vec::new();
+        };
+        match inner {
+            CompressionInner::DeflateEncoder(e) => {
+                let _ = std::io::Write::write_all(e, &input);
+                let _ = std::io::Write::flush(e);
+                std::mem::take(e.get_mut())
+            }
+            CompressionInner::DeflateDecoder(d) => {
+                let _ = std::io::Write::write_all(d, &input);
+                let _ = std::io::Write::flush(d);
+                std::mem::take(d.get_mut())
+            }
+            CompressionInner::DeflateRawEncoder(e) => {
+                let _ = std::io::Write::write_all(e, &input);
+                let _ = std::io::Write::flush(e);
+                std::mem::take(e.get_mut())
+            }
+            CompressionInner::DeflateRawDecoder(d) => {
+                let _ = std::io::Write::write_all(d, &input);
+                let _ = std::io::Write::flush(d);
+                std::mem::take(d.get_mut())
+            }
+            CompressionInner::GzipEncoder(e) => {
+                let _ = std::io::Write::write_all(e, &input);
+                let _ = std::io::Write::flush(e);
+                std::mem::take(e.get_mut())
+            }
+            CompressionInner::GzipDecoder(d) => {
+                let _ = std::io::Write::write_all(d, &input);
+                let _ = std::io::Write::flush(d);
+                std::mem::take(d.get_mut())
+            }
+        }
+    });
+
+    rv.set(vec_to_uint8_array(scope, output).into());
+}
+
+/// `op_compression_finish(handle_id: number, report_errors: boolean) -> Uint8Array` —
+/// finalize the encoder/decoder, return any remaining output bytes, and
+/// drop the handle. If `report_errors` is false, errors from the
+/// encoder/decoder are swallowed (returns an empty `Uint8Array`).
+fn op_compression_finish(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let handle_id = args.get(0).integer_value(scope).unwrap_or(0) as u32;
+    let report_errors = args.get(1).boolean_value(scope);
+
+    let inner = COMPRESSION_REGISTRY.with(|reg| {
+        reg.borrow_mut().remove(&handle_id)
+    });
+
+    let Some(inner) = inner else {
+        rv.set(vec_to_uint8_array(scope, Vec::new()).into());
+        return;
+    };
+
+    let result: Result<Vec<u8>, std::io::Error> = match inner {
+        CompressionInner::DeflateEncoder(e) => e.finish(),
+        CompressionInner::DeflateDecoder(d) => d.finish(),
+        CompressionInner::DeflateRawEncoder(e) => e.finish(),
+        CompressionInner::DeflateRawDecoder(d) => d.finish(),
+        CompressionInner::GzipEncoder(e) => e.finish(),
+        CompressionInner::GzipDecoder(d) => d.finish(),
+    };
+
+    match result {
+        Ok(bytes) => {
+            rv.set(vec_to_uint8_array(scope, bytes).into());
+        }
+        Err(_) => {
+            if report_errors {
+                let msg = v8::String::new(scope, "compression/decompression error").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+            } else {
+                rv.set(vec_to_uint8_array(scope, Vec::new()).into());
+            }
+        }
+    }
+}
 
 /// Attach a native function to `target` under `name`. Local copy of
 /// `web::mod::set_fn` — kept here so `ops` doesn't reach into `web`'s
