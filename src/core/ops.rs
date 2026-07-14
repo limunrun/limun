@@ -37,160 +37,141 @@ use v8::ValueSerializerHelper;
 /// op attached. Called once from `core::mod::execute`, before internal JS
 /// modules evaluate (so primordials/infra modules can call ops during
 /// their top-level evaluation).
-pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
-    let global = context.global(scope);
-    let ops = v8::Object::new(scope);
+macro_rules! ops_entries {
+    ($(($name:expr, $callback:path)),* $(,)?) => {
+        /// Install the `__limunOps` namespace on `globalThis` with every registered
+        /// op attached. Called once from `core::mod::execute`, before internal JS
+        /// modules evaluate (so primordials/infra modules can call ops during
+        /// their top-level evaluation).
+        pub fn install(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) {
+            let global = context.global(scope);
+            let ops = v8::Object::new(scope);
 
-    set_fn(scope, ops, "op_test_add", op_test_add);
-    set_fn(scope, ops, "op_print", op_print);
-    set_fn(scope, ops, "op_is_proxy", op_is_proxy);
-    set_fn(scope, ops, "op_navigator_hardware_concurrency", op_navigator_hardware_concurrency);
-    set_fn(scope, ops, "op_navigator_platform", op_navigator_platform);
-    set_fn(scope, ops, "op_base64_atob", op_base64_atob);
-    set_fn(scope, ops, "op_base64_btoa", op_base64_btoa);
-    set_fn(scope, ops, "op_compression_new", op_compression_new);
-    set_fn(scope, ops, "op_compression_write", op_compression_write);
-    set_fn(scope, ops, "op_compression_finish", op_compression_finish);
-    set_fn(scope, ops, "op_encoding_normalize_label", op_encoding_normalize_label);
-    set_fn(scope, ops, "op_encoding_decode_single", op_encoding_decode_single);
-    set_fn(scope, ops, "op_encoding_new_decoder", op_encoding_new_decoder);
-    set_fn(scope, ops, "op_encoding_decode", op_encoding_decode);
-    set_fn(scope, ops, "op_encoding_decode_finish", op_encoding_decode_finish);
-    set_fn(scope, ops, "op_encoding_encode_into", op_encoding_encode_into);
-    set_fn(scope, ops, "op_timer_schedule", op_timer_schedule);
-    set_fn(scope, ops, "op_timer_clear", op_timer_clear);
-    set_fn(scope, ops, "op_queue_microtask", op_queue_microtask);
-    set_fn(scope, ops, "op_now", op_now);
-    set_fn(scope, ops, "op_time_origin", op_time_origin);
-    set_fn(scope, ops, "op_prompt_alert", op_prompt_alert);
-    set_fn(scope, ops, "op_prompt_confirm", op_prompt_confirm);
-    set_fn(scope, ops, "op_prompt_prompt", op_prompt_prompt);
-    set_fn(scope, ops, "op_prompt_is_tty", op_prompt_is_tty);
+            $(
+                set_fn(scope, ops, $name, $callback);
+            )*
 
-    // AbortSignal bridge ops — let Rust callers (fetch) read the JS-defined
-    // `AbortSignal`'s state and register abort listeners without reaching
-    // into JS private symbols. The JS class owns the spec surface; these
-    // ops are thin bridges that call the public getters / `addEventListener`.
-    set_fn(scope, ops, "op_abort_signal_is_aborted", op_abort_signal_is_aborted);
-    set_fn(scope, ops, "op_abort_signal_get_reason", op_abort_signal_get_reason);
-    set_fn(scope, ops, "op_abort_signal_add_listener", op_abort_signal_add_listener);
+            crate::web::set_global(scope, global, "__limunOps", ops.into());
+        }
 
-    // Fetch Standard — the async HTTP transport (reqwest + tokio + the
-    // bridge channel). The spec surface lives entirely in JS
-    // (`ext:limun/20_headers.js` through `ext:limun/23_fetch.js`); see
-    // `web::fetch::op_fetch`'s doc comment.
-    set_fn(scope, ops, "op_fetch", crate::web::fetch::op_fetch);
+        /// Function callbacks that must be registered as external references so
+        /// the startup snapshot can restore the native `__limunOps` functions.
+        pub fn external_refs() -> Vec<v8::ExternalReference> {
+            use v8::MapFnTo;
+            vec![
+                $(v8::ExternalReference { function: $callback.map_fn_to() }),*,
+            ]
+        }
+    };
+}
 
-    // WebSocket Standard — async WebSocket transport (tokio-tungstenite +
-    // bridge channel). The spec surface lives in JS
-    // (`ext:limun/24_websocket.js`); see `web::websocket`'s doc comment.
-    set_fn(scope, ops, "op_ws_create", crate::web::websocket::op_ws_create);
-    set_fn(scope, ops, "op_ws_next_event", crate::web::websocket::op_ws_next_event);
-    set_fn(scope, ops, "op_ws_get_buffer", crate::web::websocket::op_ws_get_buffer);
-    set_fn(scope, ops, "op_ws_get_buffer_as_string", crate::web::websocket::op_ws_get_buffer_as_string);
-    set_fn(scope, ops, "op_ws_get_error", crate::web::websocket::op_ws_get_error);
-    set_fn(scope, ops, "op_ws_send_text", crate::web::websocket::op_ws_send_text);
-    set_fn(scope, ops, "op_ws_send_binary", crate::web::websocket::op_ws_send_binary);
-    set_fn(scope, ops, "op_ws_close", crate::web::websocket::op_ws_close);
-    set_fn(scope, ops, "op_ws_get_buffered_amount", crate::web::websocket::op_ws_get_buffered_amount);
+ops_entries! {
+    ("op_test_add", op_test_add),
+    ("op_print", op_print),
+    ("op_is_proxy", op_is_proxy),
+    ("op_navigator_hardware_concurrency", op_navigator_hardware_concurrency),
+    ("op_navigator_platform", op_navigator_platform),
+    ("op_base64_atob", op_base64_atob),
+    ("op_base64_btoa", op_base64_btoa),
+    ("op_compression_new", op_compression_new),
+    ("op_compression_write", op_compression_write),
+    ("op_compression_finish", op_compression_finish),
+    ("op_encoding_normalize_label", op_encoding_normalize_label),
+    ("op_encoding_decode_single", op_encoding_decode_single),
+    ("op_encoding_new_decoder", op_encoding_new_decoder),
+    ("op_encoding_decode", op_encoding_decode),
+    ("op_encoding_decode_finish", op_encoding_decode_finish),
+    ("op_encoding_encode_into", op_encoding_encode_into),
+    ("op_timer_schedule", op_timer_schedule),
+    ("op_timer_clear", op_timer_clear),
+    ("op_queue_microtask", op_queue_microtask),
+    ("op_now", op_now),
+    ("op_time_origin", op_time_origin),
+    ("op_prompt_alert", op_prompt_alert),
+    ("op_prompt_confirm", op_prompt_confirm),
+    ("op_prompt_prompt", op_prompt_prompt),
+    ("op_prompt_is_tty", op_prompt_is_tty),
 
-    // URL Standard ops — parse/reparse/serialize + search-params helpers.
-    // The spec surface (the `URL`/`URLSearchParams` classes, getters,
-    // setters, live linkage, WebIDL argument validation) lives in the JS
-    // module `ext:limun/00_url.js`; these ops are the irreducible native
-    // work (the `url` crate's parser, which is the same one Servo/Firefox
-    // use). Flat: strings + a `Uint32Array` scratch buffer in, number
-    // (status) / string out.
-    set_fn(scope, ops, "op_url_parse", op_url_parse);
-    set_fn(scope, ops, "op_url_parse_with_base", op_url_parse_with_base);
-    set_fn(scope, ops, "op_url_get_serialization", op_url_get_serialization);
-    set_fn(scope, ops, "op_url_reparse", op_url_reparse);
-    set_fn(scope, ops, "op_url_parse_search_params", op_url_parse_search_params);
-    set_fn(scope, ops, "op_url_stringify_search_params", op_url_stringify_search_params);
+    ("op_abort_signal_is_aborted", op_abort_signal_is_aborted),
+    ("op_abort_signal_get_reason", op_abort_signal_get_reason),
+    ("op_abort_signal_add_listener", op_abort_signal_add_listener),
 
-    // Structured clone / MessagePort — V8 `ValueSerializer`/`ValueDeserializer`
-    // backing ops. The spec surface (`structuredClone` global,
-    // `MessageChannel`/`MessagePort`/`MessageEvent`, transfer-list validation,
-    // JS-side message queues for single-realm delivery) lives in the JS
-    // modules `ext:limun/02_structured_clone.js` and
-    // `ext:limun/13_message_port.js`. These three ops are the irreducible
-    // native work: V8's structured-clone wire format (serialize to bytes,
-    // deserialize back), with host-object brand callbacks (for MessagePort
-    // transfer) and `ArrayBuffer` transfer (detach on serialize, mint fresh
-    // backing stores on deserialize).
-    //
-    // Limun has no `SharedArrayBuffer` and no Wasm module store, so the
-    // `get_shared_array_buffer_id`/`get_wasm_module_transfer_id` delegate
-    // hooks return `None` (V8 then refuses to clone SABs / Wasm modules,
-    // matching `core.structuredClone`'s TypeError → DOMException
-    // "DataCloneError" path in the JS wrapper).
-    set_fn(scope, ops, "op_structured_clone", op_structured_clone);
-    set_fn(scope, ops, "op_serialize", op_serialize);
-    set_fn(scope, ops, "op_deserialize", op_deserialize);
+    ("op_fetch", crate::web::fetch::op_fetch),
 
-    // WebCrypto — `crypto.getRandomValues()`, `crypto.randomUUID()`, and
-    // `crypto.subtle.digest()` backing ops. The spec surface (the `Crypto`/
-    // `SubtleCrypto`/`CryptoKey` classes, WebIDL argument validation,
-    // algorithm name normalization, error-type selection, Promise wrapping
-    // for `digest`) lives in the JS module `ext:limun/03_crypto.js`; these
-    // ops are the irreducible native work: OS-entropy random byte
-    // generation, UUID v4 bit-fixing + hex formatting, and hash computation
-    // via the `sha1`/`sha2`/`sha3` crates.
-    set_fn(scope, ops, "op_crypto_get_random_values", op_crypto_get_random_values);
-    set_fn(scope, ops, "op_crypto_random_uuid", op_crypto_random_uuid);
-    set_fn(scope, ops, "op_crypto_digest", op_crypto_digest);
-    set_fn(scope, ops, "op_crypto_generate_key", op_crypto_generate_key);
-    set_fn(scope, ops, "op_crypto_sign_hmac", op_crypto_sign_hmac);
-    set_fn(scope, ops, "op_crypto_encrypt_aes_cbc", op_crypto_encrypt_aes_cbc);
-    set_fn(scope, ops, "op_crypto_decrypt_aes_cbc", op_crypto_decrypt_aes_cbc);
-    set_fn(scope, ops, "op_crypto_encrypt_aes_ctr", op_crypto_encrypt_aes_ctr);
-    set_fn(scope, ops, "op_crypto_decrypt_aes_ctr", op_crypto_decrypt_aes_ctr);
-    set_fn(scope, ops, "op_crypto_encrypt_aes_gcm", op_crypto_encrypt_aes_gcm);
-    set_fn(scope, ops, "op_crypto_decrypt_aes_gcm", op_crypto_decrypt_aes_gcm);
-    set_fn(scope, ops, "op_crypto_generate_rsa_key", op_crypto_generate_rsa_key);
-    set_fn(scope, ops, "op_crypto_import_rsa_pkcs8", op_crypto_import_rsa_pkcs8);
-    set_fn(scope, ops, "op_crypto_import_rsa_spki", op_crypto_import_rsa_spki);
-    set_fn(scope, ops, "op_crypto_export_rsa_pkcs8", op_crypto_export_rsa_pkcs8);
-    set_fn(scope, ops, "op_crypto_export_rsa_spki", op_crypto_export_rsa_spki);
-    set_fn(scope, ops, "op_crypto_import_rsa_jwk", op_crypto_import_rsa_jwk);
-    set_fn(scope, ops, "op_crypto_export_rsa_jwk", op_crypto_export_rsa_jwk);
-    set_fn(scope, ops, "op_crypto_sign_rsa", op_crypto_sign_rsa);
-    set_fn(scope, ops, "op_crypto_verify_rsa", op_crypto_verify_rsa);
-    set_fn(scope, ops, "op_crypto_encrypt_rsa_oaep", op_crypto_encrypt_rsa_oaep);
-    set_fn(scope, ops, "op_crypto_decrypt_rsa_oaep", op_crypto_decrypt_rsa_oaep);
-    set_fn(scope, ops, "op_crypto_generate_ec_keypair", op_crypto_generate_ec_keypair);
-    set_fn(scope, ops, "op_crypto_import_ec_raw", op_crypto_import_ec_raw);
-    set_fn(scope, ops, "op_crypto_import_ec_pkcs8", op_crypto_import_ec_pkcs8);
-    set_fn(scope, ops, "op_crypto_import_ec_spki", op_crypto_import_ec_spki);
-    set_fn(scope, ops, "op_crypto_export_ec_raw", op_crypto_export_ec_raw);
-    set_fn(scope, ops, "op_crypto_export_ec_pkcs8", op_crypto_export_ec_pkcs8);
-    set_fn(scope, ops, "op_crypto_export_ec_spki", op_crypto_export_ec_spki);
-    set_fn(scope, ops, "op_crypto_ec_public_from_private", op_crypto_ec_public_from_private);
-    set_fn(scope, ops, "op_crypto_import_ec_jwk_private", op_crypto_import_ec_jwk_private);
-    set_fn(scope, ops, "op_crypto_sign_ecdsa", op_crypto_sign_ecdsa);
-    set_fn(scope, ops, "op_crypto_verify_ecdsa", op_crypto_verify_ecdsa);
-    set_fn(scope, ops, "op_crypto_derive_bits_ecdh", op_crypto_derive_bits_ecdh);
-    set_fn(scope, ops, "op_crypto_generate_ed25519_keypair", op_crypto_generate_ed25519_keypair);
-    set_fn(scope, ops, "op_crypto_import_spki_ed25519", op_crypto_import_spki_ed25519);
-    set_fn(scope, ops, "op_crypto_import_pkcs8_ed25519", op_crypto_import_pkcs8_ed25519);
-    set_fn(scope, ops, "op_crypto_export_spki_ed25519", op_crypto_export_spki_ed25519);
-    set_fn(scope, ops, "op_crypto_export_pkcs8_ed25519", op_crypto_export_pkcs8_ed25519);
-    set_fn(scope, ops, "op_crypto_jwk_x_ed25519", op_crypto_jwk_x_ed25519);
-    set_fn(scope, ops, "op_crypto_sign_ed25519", op_crypto_sign_ed25519);
-    set_fn(scope, ops, "op_crypto_verify_ed25519", op_crypto_verify_ed25519);
-    set_fn(scope, ops, "op_crypto_generate_x25519_keypair", op_crypto_generate_x25519_keypair);
-    set_fn(scope, ops, "op_crypto_import_spki_x25519", op_crypto_import_spki_x25519);
-    set_fn(scope, ops, "op_crypto_import_pkcs8_x25519", op_crypto_import_pkcs8_x25519);
-    set_fn(scope, ops, "op_crypto_export_spki_x25519", op_crypto_export_spki_x25519);
-    set_fn(scope, ops, "op_crypto_export_pkcs8_x25519", op_crypto_export_pkcs8_x25519);
-    set_fn(scope, ops, "op_crypto_x25519_public_key", op_crypto_x25519_public_key);
-    set_fn(scope, ops, "op_crypto_derive_bits_x25519", op_crypto_derive_bits_x25519);
-    set_fn(scope, ops, "op_crypto_derive_bits_hkdf", op_crypto_derive_bits_hkdf);
-    set_fn(scope, ops, "op_crypto_derive_bits_pbkdf2", op_crypto_derive_bits_pbkdf2);
-    set_fn(scope, ops, "op_crypto_wrap_key_aes_kw", op_crypto_wrap_key_aes_kw);
-    set_fn(scope, ops, "op_crypto_unwrap_key_aes_kw", op_crypto_unwrap_key_aes_kw);
+    ("op_ws_create", crate::web::websocket::op_ws_create),
+    ("op_ws_next_event", crate::web::websocket::op_ws_next_event),
+    ("op_ws_get_buffer", crate::web::websocket::op_ws_get_buffer),
+    ("op_ws_get_buffer_as_string", crate::web::websocket::op_ws_get_buffer_as_string),
+    ("op_ws_get_error", crate::web::websocket::op_ws_get_error),
+    ("op_ws_send_text", crate::web::websocket::op_ws_send_text),
+    ("op_ws_send_binary", crate::web::websocket::op_ws_send_binary),
+    ("op_ws_close", crate::web::websocket::op_ws_close),
+    ("op_ws_get_buffered_amount", crate::web::websocket::op_ws_get_buffered_amount),
 
-    crate::web::set_global(scope, global, "__limunOps", ops.into());
+    ("op_url_parse", op_url_parse),
+    ("op_url_parse_with_base", op_url_parse_with_base),
+    ("op_url_get_serialization", op_url_get_serialization),
+    ("op_url_reparse", op_url_reparse),
+    ("op_url_parse_search_params", op_url_parse_search_params),
+    ("op_url_stringify_search_params", op_url_stringify_search_params),
+
+    ("op_structured_clone", op_structured_clone),
+    ("op_serialize", op_serialize),
+    ("op_deserialize", op_deserialize),
+
+    ("op_crypto_get_random_values", op_crypto_get_random_values),
+    ("op_crypto_random_uuid", op_crypto_random_uuid),
+    ("op_crypto_digest", op_crypto_digest),
+    ("op_crypto_generate_key", op_crypto_generate_key),
+    ("op_crypto_sign_hmac", op_crypto_sign_hmac),
+    ("op_crypto_encrypt_aes_cbc", op_crypto_encrypt_aes_cbc),
+    ("op_crypto_decrypt_aes_cbc", op_crypto_decrypt_aes_cbc),
+    ("op_crypto_encrypt_aes_ctr", op_crypto_encrypt_aes_ctr),
+    ("op_crypto_decrypt_aes_ctr", op_crypto_decrypt_aes_ctr),
+    ("op_crypto_encrypt_aes_gcm", op_crypto_encrypt_aes_gcm),
+    ("op_crypto_decrypt_aes_gcm", op_crypto_decrypt_aes_gcm),
+    ("op_crypto_generate_rsa_key", op_crypto_generate_rsa_key),
+    ("op_crypto_import_rsa_pkcs8", op_crypto_import_rsa_pkcs8),
+    ("op_crypto_import_rsa_spki", op_crypto_import_rsa_spki),
+    ("op_crypto_export_rsa_pkcs8", op_crypto_export_rsa_pkcs8),
+    ("op_crypto_export_rsa_spki", op_crypto_export_rsa_spki),
+    ("op_crypto_import_rsa_jwk", op_crypto_import_rsa_jwk),
+    ("op_crypto_export_rsa_jwk", op_crypto_export_rsa_jwk),
+    ("op_crypto_sign_rsa", op_crypto_sign_rsa),
+    ("op_crypto_verify_rsa", op_crypto_verify_rsa),
+    ("op_crypto_encrypt_rsa_oaep", op_crypto_encrypt_rsa_oaep),
+    ("op_crypto_decrypt_rsa_oaep", op_crypto_decrypt_rsa_oaep),
+    ("op_crypto_generate_ec_keypair", op_crypto_generate_ec_keypair),
+    ("op_crypto_import_ec_raw", op_crypto_import_ec_raw),
+    ("op_crypto_import_ec_pkcs8", op_crypto_import_ec_pkcs8),
+    ("op_crypto_import_ec_spki", op_crypto_import_ec_spki),
+    ("op_crypto_export_ec_raw", op_crypto_export_ec_raw),
+    ("op_crypto_export_ec_pkcs8", op_crypto_export_ec_pkcs8),
+    ("op_crypto_export_ec_spki", op_crypto_export_ec_spki),
+    ("op_crypto_ec_public_from_private", op_crypto_ec_public_from_private),
+    ("op_crypto_import_ec_jwk_private", op_crypto_import_ec_jwk_private),
+    ("op_crypto_sign_ecdsa", op_crypto_sign_ecdsa),
+    ("op_crypto_verify_ecdsa", op_crypto_verify_ecdsa),
+    ("op_crypto_derive_bits_ecdh", op_crypto_derive_bits_ecdh),
+    ("op_crypto_generate_ed25519_keypair", op_crypto_generate_ed25519_keypair),
+    ("op_crypto_import_spki_ed25519", op_crypto_import_spki_ed25519),
+    ("op_crypto_import_pkcs8_ed25519", op_crypto_import_pkcs8_ed25519),
+    ("op_crypto_export_spki_ed25519", op_crypto_export_spki_ed25519),
+    ("op_crypto_export_pkcs8_ed25519", op_crypto_export_pkcs8_ed25519),
+    ("op_crypto_jwk_x_ed25519", op_crypto_jwk_x_ed25519),
+    ("op_crypto_sign_ed25519", op_crypto_sign_ed25519),
+    ("op_crypto_verify_ed25519", op_crypto_verify_ed25519),
+    ("op_crypto_generate_x25519_keypair", op_crypto_generate_x25519_keypair),
+    ("op_crypto_import_spki_x25519", op_crypto_import_spki_x25519),
+    ("op_crypto_import_pkcs8_x25519", op_crypto_import_pkcs8_x25519),
+    ("op_crypto_export_spki_x25519", op_crypto_export_spki_x25519),
+    ("op_crypto_export_pkcs8_x25519", op_crypto_export_pkcs8_x25519),
+    ("op_crypto_x25519_public_key", op_crypto_x25519_public_key),
+    ("op_crypto_derive_bits_x25519", op_crypto_derive_bits_x25519),
+    ("op_crypto_derive_bits_hkdf", op_crypto_derive_bits_hkdf),
+    ("op_crypto_derive_bits_pbkdf2", op_crypto_derive_bits_pbkdf2),
+    ("op_crypto_wrap_key_aes_kw", op_crypto_wrap_key_aes_kw),
+    ("op_crypto_unwrap_key_aes_kw", op_crypto_unwrap_key_aes_kw),
 }
 
 /// `op_test_add(a: number, b: number) -> number` — the proof op. Returns
@@ -563,6 +544,8 @@ fn op_compression_finish(
 /// Attach a native function to `target` under `name`. Local copy of
 /// `web::mod::set_fn` — kept here so `ops` doesn't reach into `web`'s
 /// private helpers (that `set_fn` is `pub(crate)`-private to `web`).
+/// Uses `FunctionTemplate` so the callback survives V8 startup snapshots
+/// when registered in `external_refs`.
 fn set_fn(
     scope: &mut v8::PinScope,
     target: v8::Local<v8::Object>,
@@ -570,7 +553,9 @@ fn set_fn(
     callback: impl v8::MapFnTo<v8::FunctionCallback>,
 ) {
     let key = v8::String::new(scope, name).unwrap();
-    let func = v8::Function::new(scope, callback).unwrap();
+    let callback = callback.map_fn_to();
+    let fn_template = v8::FunctionTemplate::builder_raw(callback).build(scope);
+    let func = fn_template.get_function(scope).unwrap();
     target.set(scope, key.into(), func.into());
 }
 

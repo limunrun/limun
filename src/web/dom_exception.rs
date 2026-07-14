@@ -41,6 +41,12 @@ pub fn cache_ctor(scope: &mut v8::PinScope) {
     CTOR.with(|c| *c.borrow_mut() = Some(v8::Global::new(scope, ctor)));
 }
 
+/// Drop the cached `DOMException` constructor. Called by the snapshot generator
+/// before serializing the context so that no `v8::Global` handle is kept alive.
+pub fn clear_cache() {
+    CTOR.with(|c| c.borrow_mut().take());
+}
+
 /// Build a `DOMException` from Rust by calling the cached JS constructor.
 /// Used by `throw_dom_exception` and (previously) by `AbortSignal` (whose
 /// default abort reason is now minted in JS). Returns a bare V8 `Error`

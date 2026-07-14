@@ -5,4 +5,5 @@
 # Pulled fresh on each repo clone (see .devcontainer/devcontainer.json).
 /tests/wpt/suite/
 /tests/node_compat/runner/suite/
-/tests/util/std/
+/tests/util/std/.snaptest/
+src/snapshot.bin

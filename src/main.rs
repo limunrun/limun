@@ -14,10 +14,7 @@
 //! standard import maps (`imports`/`scopes`/`integrity`) are read from
 //! ./limun.json. Anything unresolvable fails loud.
 
-mod core;
-mod limun;
-mod web;
-
+use limun::core;
 use std::{env, fs, process::ExitCode};
 use url::Url;
 
@@ -80,8 +77,14 @@ fn main() -> ExitCode {
     v8::V8::initialize_platform(platform);
     v8::V8::initialize();
 
+    static SNAPSHOT: &[u8] = include_bytes!("snapshot.bin");
+    let external_refs = core::external_refs::get();
+
     let exit = {
-        let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
+        let params = v8::CreateParams::default()
+            .snapshot_blob(SNAPSHOT.into())
+            .external_references(external_refs.into());
+        let isolate = &mut v8::Isolate::new(params);
         let exit = core::execute(isolate, &entry_url);
         // Globals must drop while the isolate is still alive.
         core::state::clear_module_state();

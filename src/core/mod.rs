@@ -3,6 +3,7 @@
 pub mod bridge;
 pub mod event_loop;
 pub mod exception;
+pub mod external_refs;
 pub mod import_map;
 pub mod import_meta;
 pub mod internal_js;
@@ -20,8 +21,6 @@ use crate::core::import_meta::host_initialize_import_meta_object_callback;
 use crate::core::module::{
     ModuleKind, dynamic_import_callback, load_module, resolve_module_callback,
 };
-use crate::limun;
-use crate::web;
 use std::process::ExitCode;
 use url::Url;
 
@@ -41,67 +40,20 @@ pub fn execute(isolate: &mut v8::Isolate, entry: &Url) -> ExitCode {
 
     v8::scope!(let scope, isolate);
 
+    // The isolate was created from a startup snapshot that already contains
+    // the bootstrapped context: web globals, `Limun`, `__limunOps`, and all
+    // evaluated internal JS modules. Restoring the default context re-creates
+    // the global proxy and the heap state captured in the snapshot.
     let context = v8::Context::new(scope, Default::default());
     let mut context_scope = v8::ContextScope::new(scope, context);
     v8::scope!(let scope, &mut context_scope);
 
-    web::install(scope, context);
-    limun::install(scope, context);
-    // Install the `__limunOps` namespace before the internal JS modules
-    // evaluate — primordials/infra modules call ops at top level.
-    ops::install(scope, context);
-
-    // Bootstrap the internal JS modules. Order is the registry order
-    // (see `internal_js::REGISTRY`): primordials first, then infra modules,
-    // then the proof module. Each is compiled as an ES module and
-    // evaluated before the user's entry module. They bypass `core::io` and
-    // `core::permissions` — internal modules are trusted and built into the
-    // binary.
     v8::tc_scope!(let tc, scope);
 
-    for m in internal_js::iter() {
-        let Some(url) = internal_js::specifier_url(m.specifier) else {
-            eprintln!("limun: bad internal specifier \"{}\"", m.specifier);
-            return ExitCode::FAILURE;
-        };
-        let Some(module) = module::load_module_from_source(
-            tc,
-            &url,
-            ModuleKind::JavaScript,
-            m.source,
-        ) else {
-            report_exception(tc, m.specifier);
-            return ExitCode::FAILURE;
-        };
-        if module
-            .instantiate_module(tc, resolve_module_callback)
-            .is_none()
-        {
-            report_exception(tc, m.specifier);
-            return ExitCode::FAILURE;
-        }
-        let _completion = module.evaluate(tc);
-        if module.get_status() == v8::ModuleStatus::Errored {
-            let exception = module.get_exception();
-            let text = exception
-                .to_string(tc)
-                .map(|s| s.to_rust_string_lossy(tc))
-                .unwrap_or_else(|| "<unprintable exception>".to_string());
-            eprintln!("limun: {}: {text}", m.specifier);
-            return ExitCode::FAILURE;
-        }
-        if tc.has_caught() {
-            report_exception(tc, m.specifier);
-            return ExitCode::FAILURE;
-        }
-    }
-
-    // Cache the JS-defined `DOMException` constructor for Rust callers
-    // (`throw_dom_exception`, `AbortSignal`'s default abort reason). The
-    // class was installed on `globalThis` by `ext:limun/01_dom_exception.js`
-    // in the loop above; stash a `v8::Global` so `new_instance` can mint
-    // instances without a `globalThis` lookup.
-    web::dom_exception::cache_ctor(tc);
+    // The snapshot captures the JS-defined `DOMException` constructor, but
+    // the Rust-side `v8::Global` cache is per-process state. Re-cache it now
+    // so Rust callers can mint instances during this run.
+    crate::web::dom_exception::cache_ctor(tc);
 
     // The entry point is always plain JS — import attributes only make
     // sense on an `import` statement/expression, and there's no such thing
