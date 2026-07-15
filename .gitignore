@@ -7,3 +7,4 @@
 /tests/node_compat/runner/suite/
 /tests/util/std/.snaptest/
 src/snapshot.bin
+/.snaptest
