@@ -12,4 +12,6 @@ See [MISSION.md](./MISSION.md) for the why and the API philosophy.
 
 ---
 
-BTW im using LLMs heavyly for this. i just want it to exists rn. i dont have time to work in it myself.
+BTW im using LLMs heavyly for this. i just want it to exists rn. i dont have time to work on it myself.
+I just wanna make sure of the DX.
+Later if it looks good, it can be rewritten cleanly knowing the shape we want.
