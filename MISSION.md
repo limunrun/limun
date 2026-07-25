@@ -80,7 +80,7 @@ Example:
         "io": {
             "default": false, // default can be defined in every scope for ease and DX.
             "file://**": { read: true }, // Glob based
-            "./data:": true, // Based on base URL.
+            "./data": true, // Based on base URL.
             "https://esm.sh": { read: true },
             "file:///etc": false, // bottom ones overwrite the top ones.
         },
