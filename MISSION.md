@@ -2,81 +2,142 @@
 
 Goal: making the JS runtime space cleaner. That is the whole reason Limun
 exists. If we are not maximizing for this, there is no reason for Limun to
-exist — we can just use Bun or Node.js directly. It's the API.
-
-## Principle: minimize the isolate
-
-The runtime should be as small as possible. Everything that can live outside
-the runtime, should. Node.js compat, npm package acquisition, package
-resolution — none of that belongs in the runtime binary. The runtime loads
-plain ESM through an import map; everything else is a userland concern.
+exist.
 
 ## Why web standard API?
 
 Not for browser compatibility — that is a side effect. The reason is that
 it's a good standard.
 
-## API
+## IO
 
-Web-standard API by default. Uses the web-native API even for FS stuff
-(https://developer.mozilla.org/en-US/docs/Web/API/File_System_API). If
-something exists in the web standard, implement it and use it. If it's
-missing for our case, have a global namespace like `Limun` and put things
-in it — e.g. `Limun.fs.stat`.
+In Rust we should build an IO library, and it should have everything FS related, and also everything Network related basically.
 
-Global space always keeps close to the web standards, only excluding DOM
-stuff.
+So basically IO handles everything URL related.
 
-The only breaking changes can happen on `Limun`, which might lose an impl
-if it now exists in the web standard and we implement it using the standard.
+These are all will be the primitive IO stuff we will use for everything in here, so permissions are applied correctly to every operation.
 
-So `Limun` namespace exists purely for things that don't exist in the web
-standard yet.
+## Limun namespace
 
-`Limun` namespace mode is async by default (returns promises), but `Sync`
-suffix variants exist.
+Every base native operation will be defined under the Limun namespace.
 
-Things like FS might be spread across the web standard API and `Limun` at
-the same time. A `@std/fs` library can combine them into a single library,
-which also prevents breaking your code when something in `Limun` later moves
-into the standard web globals.
+And everything under Limun namespace has their own scope. Such as `Limun.fs`
 
-Web URL packages (like `https://esm.sh`) can be checksummed with a `#sha256`
-suffix, plus a lock file.
+And everything under limun namespace is a native method.
+
+Everything else being implemented is pure js like Deno does, they just wrap the `Limun` namespace for native operations.
+
+And later we will also build an `@std` package that will let you use these in a nicer way. Similar to JSR:@std.
+
+So everything on `Limun` namespace can break or change. but Web API and @std wrapping is doesnt break that often.
+
+## `Limun.compat`
+
+Everything we will add for compability will live under this scope.
+
+Such as `Limun.compat.CommonJS.*`, `Limun.compat.NodeJS.*`
+
+And for example CommonJS compability layer will transform CommonJS code during AOT, similar to `esm.sh` and use these primitive compat features.
+
+## Web API
+
+Limun will support every non-DOM web/browser API natively. All listed in [TODO.md](TODO.md).
+
+This includes things like File System API which should open a file picker dialog, that lets you read files without getting permission from it in the `limun.json` similar to how browsers do it.
+
+This also includes things like Geo Location, Sensors, Web GPU, Canvas, Share, Vibrate, Bluetooh, etc...
+
+And things like `fetch()` API will also support `file:` URLs under the WebDAV standard.
+
+Similarly we also support any ESM import such as `http:` or `file:` or `data:` URL based imports basically.
+
+These can also be used for fs operations, or fetch, as i mentioned.
+
+We also support import maps in `limun.json`, the same standard as on the web.
+
+Current base is the CWD if the code is being run from CLI as `limun run ./app/main.ts`.
+
+But if the app is compiled and standalone, its the base URL is the executation path.
+
+And also includes LocalStorage, IDB, and stuff, which we can define the base location of in `limun.json` probably.
 
 ## Permissions
 
-Permission model is simple: **read** and **write**. That's it. No `import`,
-`execute`, or other permissions — if you can read it, you can import it
-already (eval the read, or use a Worker with a data URL). Creating an illusion
-of more permissions than you actually enforce is worse than being honest
-about the two you have.
+Everything is isolated with permissions and even more than browser basically since we limit fetch a lot too.
 
-Permissions are URL-based. Everything in the project — imports, file access,
-network — is addressed via URLs, so one pattern list covers all IO. See
-[IO.md](./IO.md) for the full model.
+And unlike Deno, we dont have prompts for denied permissions, if permission is not defined, it fails.
 
-## Node compat
+So everything the an app can do should be defined in permissions in `limun.json` without that it has no permissions to fetch, or io or anything else.
 
-Node.js compatibility is never ambient and never in the runtime. It's an
-external package you install — something like `@limun/node` or `@std/node` —
-which wraps `@std` packages to implement the Node API in pure TypeScript.
+IO permissions are a little different than Deno, because we know if you can read something you can import it or execute it already via eval or anything else. So only IO permission we have will be based on read and write.
 
-That package injects Node globals into `globalThis` explicitly:
-`injectNodeJs(globalThis)`. Nobody can pollute your scope implicitly; you
-have to deliberately pollute it. You can disable global scope protection
-from `limun.json`.
+Example:
 
-See [COMPAT.md](./COMPAT.md) for the full design.
+```jsonc
+{
+    "permissions": {
+        "default": true | false, // the default permissions for stuff that are not defined.
+        "io": {
+            "default": false, // default can be defined in every scope for ease and DX.
+            "file://**": { read: true }, // Glob based
+            "./data:": true, // Based on base URL.
+            "https://esm.sh": { read: true },
+            "file:///etc": false, // bottom ones overwrite the top ones.
+        },
+        "io": false | true, // also posibble for each scope. 
+        "sensors": {
+            // sensors and geo location.
+        },
+        "process": {
+            // process info and process management, getting current processes, or kill, exit etc...
+        }
+    },
+    "permissions": true | false // also possible.
+}
+```
 
-## One realm
+Another thing is, URLs defined in import map have read permission by default, since we typed it in `limun.json`.
 
-Everything runs in a single V8 context (one realm, one set of intrinsics).
-No separate `globalThis` per package — that would shatter identity across
-the boundary (`arr instanceof Array` breaks, `Error` types don't match,
-Buffer brand-checks fail). The Node surface is injected via a source
-transform, not via a second realm.
+Workers have their own permissions similar to Deno. But with some additions.
 
-## Runtime
+For example worker `default` can also be inherit by default, so `true | false | "inherit"`, so like:
 
-V8 + Rust. Should be easy.
+```ts
+new Worker(new URL("./worker.ts", import.meta.url), { limun: { permissions: "inherit" } })
+```
+
+BTW, its inherit by default anyway. It is the same interface as permissoins in `limun.json` but `default` can be `"inherit"` as well.
+
+Also Worker permissions can't be wider than the parent's permissions.
+
+But another thing it has is asking parent for permissions live.
+
+```ts
+new Worker(new URL("./worker.ts", import.meta.url), { limun: { permissionCallback: (event) => Promise<`${"deny" | "allow"} ${"always" | "once"}`> } })
+```
+
+This callback happens automatially when child worker tries to do something its not allowed to do.
+
+So parent can prompt it on UI or terminal, or decide it based on something else automatically, all user code.
+
+It runs sync on the child worker, but async on the parent.
+
+`"always"` means always in this session only. So imagine a child is spamming the permissions, we can say `"always deny"`
+
+Persistent permissions for children should be handled by the user code.
+
+## Custom protocols
+
+Limun only impl `file:`, `http(s):`, `ws(s):`, `data:`, `blob:` and etc.
+
+It doesn't have `npm:`, `jsr:` or similar custom protocols.
+
+But we allow custom user code to impl these, probably can be defined in `limun.json`.
+
+And custom protocol packages, can handle the compat AOT stuff basically. Wrapping `Limun.compat.*` methods, and stuff.
+
+But important thing here is these are not for packages only.
+
+So user code can also define things like `stratum+tpc:`, `ipfs:`, and etc.
+
+All handled as custom IO URLs, and can have defined IO permissions.

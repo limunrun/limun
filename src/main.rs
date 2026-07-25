@@ -1,104 +1,45 @@
-//! limun — minimal V8 embed with ES modules.
-//!
-//! Layer model (where things will live as this grows):
-//!   1. Web globals   — frozen, standards only. (console)
-//!   2. `Limun` ns    — native surface for what the web doesn't cover.
-//!                      Versioned, allowed to break/shrink. (`Limun.hello`)
-//!   3. `@std/*`      — userland stability layer wrapping 1+2. (packages, not here)
-//!
-//! Modules: real ESM via V8's module machinery, both static and dynamic
-//! `import()`. Every module has a URL identity (`file://` local, `https://`
-//! remote) so relative imports resolve the same way regardless of where the
-//! importing module came from. The resolver is ours — this is where
-//! limun's identity lives (later: #sha256 checksums, a lock file). Web-
-//! standard import maps (`imports`/`scopes`/`integrity`) are read from
-//! ./limun.json. Anything unresolvable fails loud.
-
-use limun::core;
-use std::{env, fs, process::ExitCode};
-use url::Url;
+use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().collect();
-    let Some(entry) = args.get(1) else {
-        eprintln!("usage: limun <file.js>");
-        return ExitCode::FAILURE;
-    };
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 2 {
+        eprintln!("usage: limun <file>");
+        return ExitCode::from(1);
+    }
 
-    let entry_path = match fs::canonicalize(entry) {
-        Ok(p) => p,
+    let path = &args[1];
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
         Err(e) => {
-            eprintln!("limun: cannot open {entry}: {e}");
-            return ExitCode::FAILURE;
+            eprintln!("error: cannot read {}: {}", path, e);
+            return ExitCode::from(1);
         }
     };
 
-    let entry_url = match Url::from_file_path(&entry_path) {
-        Ok(u) => u,
-        Err(()) => {
-            eprintln!("limun: cannot form a URL from {}", entry_path.display());
-            return ExitCode::FAILURE;
-        }
-    };
-
-    if let Err(e) = core::import_map::load_import_map() {
-        eprintln!("limun: limun.json: {e}");
-        return ExitCode::FAILURE;
-    }
-
-    if let Err(e) = core::permissions::load() {
-        eprintln!("limun: limun.json: {e}");
-        return ExitCode::FAILURE;
-    }
-    // The entry script is exempt from the `io` list (the user invoked it
-    // explicitly) but everything it imports is subject to it.
-    core::permissions::set_entry(entry_url.clone());
-
-    // --- tokio runtime boot (before V8 init) ---
-    // Multi-thread so HTTP fetch tasks run concurrently while the V8 isolate
-    // stays single-threaded on this (the main) thread. The V8 thread never
-    // enters the runtime — it only holds a Handle and spawns onto it.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .expect("failed to start tokio runtime");
-    let handle = rt.handle().clone();
-    let rx = core::runtime::init(handle);
-    core::event_loop::set_bridge_rx(rx);
-    core::event_loop::init_timer_channel();
-
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .expect("failed to install rustls crypto provider");
-
-    // --- V8 boot (once per process) ---
     let platform = v8::new_default_platform(0, false).make_shared();
     v8::V8::initialize_platform(platform);
     v8::V8::initialize();
 
-    static SNAPSHOT: &[u8] = include_bytes!("snapshot.bin");
-    let external_refs = core::external_refs::get();
+    {
+        let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
+        isolate.set_capture_stack_trace_for_uncaught_exceptions(true, 10);
 
-    let exit = {
-        let params = v8::CreateParams::default()
-            .snapshot_blob(SNAPSHOT.into())
-            .external_references(external_refs.into());
-        let isolate = &mut v8::Isolate::new(params);
-        let exit = core::execute(isolate, &entry_url);
-        // Globals must drop while the isolate is still alive.
-        core::state::clear_module_state();
-        exit
-    };
+        v8::scope!(let handle_scope, isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &v8::ContextScope::new(handle_scope, context);
 
-    // --- V8 teardown (before dropping the tokio runtime — worker threads
-    // may hold `Handle` clones, which is fine; the runtime itself is joined
-    // when `rt` drops below) ---
-    unsafe {
-        v8::V8::dispose();
+        let source = v8::String::new(scope, &source).unwrap();
+        let script = match v8::Script::compile(scope, source, None) {
+            Some(s) => s,
+            None => {
+                eprintln!("error: failed to compile script");
+                return ExitCode::from(1);
+            }
+        };
+
+        match script.run(scope) {
+            Some(_) => ExitCode::from(0),
+            None => ExitCode::from(1),
+        }
     }
-    v8::V8::dispose_platform();
-    drop(rt);
-
-    exit
 }

@@ -1,0 +1,1 @@
+git clone --depth 1 -b epochs/daily https://github.com/web-platform-tests/wpt.git tests/wpt/suite

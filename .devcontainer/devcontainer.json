@@ -8,12 +8,9 @@
     "vscode": {
       "extensions": [
         "rust-lang.rust-analyzer",
-        "tamasfe.even-better-toml"
+        "tamasfe.even-better-toml",
+        "DavidAnson.vscode-markdownlint"
       ]
     }
-  },
-
-  // Solo-clone test suites on container creation (not git submodules).
-  // These directories are gitignored — they're pulled fresh each time.
-  "postCreateCommand": "git clone --depth 1 -b epochs/daily https://github.com/web-platform-tests/wpt.git tests/wpt/suite || true"
+  }
 }
